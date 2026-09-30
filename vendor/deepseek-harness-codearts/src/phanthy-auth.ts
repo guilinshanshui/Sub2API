@@ -221,7 +221,7 @@ export class PhanthyAuth extends Service {
 
   /** 查询积分余额。 */
   async fetchCreditBalance(credential: PhanthyCredential): Promise<CreditBalance | null> {
-    return fetchPhanthyCreditBalance(this.product, credential, this.fetcher)
+    return fetchPhanthyCreditBalance(this.product, credential, this.fetcher, this.dataDir)
   }
 
   /** 领取每日登录奖励。 */

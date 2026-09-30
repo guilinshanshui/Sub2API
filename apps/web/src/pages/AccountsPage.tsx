@@ -322,7 +322,12 @@ export function AccountsPage() {
     try {
       const result = await apiPost<CreateAccountResult>('/api/accounts', { provider: addProvider })
       if (result.loginMode === 'sms' || result.loginMode === 'code') {
-        popup?.close()
+        if (result.loginMode === 'code' && result.loginUrl.length > 0) {
+          if (popup !== null) popup.location.href = result.loginUrl
+          else window.open(result.loginUrl, '_blank', 'noopener,noreferrer')
+        } else {
+          popup?.close()
+        }
         setLogin({
           ...result,
           provider: addProvider,

@@ -5,6 +5,7 @@
  */
 
 import { randomBytes } from 'node:crypto'
+import { join } from 'node:path'
 import type { CreditBalance, ClaimOutcome } from './credits.js'
 import {
   PHANTHY_OAUTH_BETA,
@@ -60,11 +61,33 @@ export async function fetchPhanthyActivitiesSummary(
   product: PhanthyProduct,
   credential: PhanthyCredential,
   fetcher: typeof fetch,
+  dataDir: string = join(process.cwd(), 'data'),
 ): Promise<PhanthyActivitiesSummary | null> {
   try {
-    const response = await fetcher(`${product.apiBase}/api/oauth/activities/summary`, {
+    if (credential.uid.trim().length === 0) return null
+    const identity = await loadOrCreatePhanthyDesktopIdentity(credential.uid, dataDir)
+    const registered = await ensurePhanthyDesktopInstallation(product, credential, identity, fetcher)
+    if (!registered.ok) return null
+    const timestampMs = Date.now()
+    const nonce = randomNonce()
+    const path = '/api/oauth/activities/summary'
+    const signature = signPhanthyDesktop(identity.privateKey, {
       method: 'GET',
-      headers: activityHeaders(credential, product),
+      path,
+      timestampMs,
+      nonce,
+      body: Buffer.alloc(0),
+    })
+    const response = await fetcher(`${product.apiBase}${path}`, {
+      method: 'GET',
+      headers: {
+        ...activityHeaders(credential, product),
+        'Content-Type': 'application/json',
+        'x-desktop-installation-id': identity.installationId,
+        'x-desktop-timestamp': String(timestampMs),
+        'x-desktop-nonce': nonce,
+        'x-desktop-signature': signature,
+      },
       signal: AbortSignal.timeout(20_000),
     })
     const result = await readPhanthyJson<PhanthyActivitiesSummary>(response)
@@ -88,8 +111,9 @@ export async function fetchPhanthyCreditBalance(
   product: PhanthyProduct,
   credential: PhanthyCredential,
   fetcher: typeof fetch,
+  dataDir: string = join(process.cwd(), 'data'),
 ): Promise<CreditBalance | null> {
-  const summary = await fetchPhanthyActivitiesSummary(product, credential, fetcher)
+  const summary = await fetchPhanthyActivitiesSummary(product, credential, fetcher, dataDir)
   return summary === null ? null : parsePhanthyCreditBalance(summary)
 }
 

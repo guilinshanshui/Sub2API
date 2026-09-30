@@ -2186,7 +2186,7 @@ function registerJetHubEndpoints(
           // 余额来自 `GET /api/oauth/activities/summary`（只读）。
           const values = await collectCreditBalances<PhanthyCredential, undefined>(accounts, undefined, {
             resolve: (ref) => ctx.credentials.resolve(ref),
-            fetchBalance: (credential) => fetchPhanthyCreditBalance(PHANTHY, credential, fetch),
+            fetchBalance: (credential) => fetchPhanthyCreditBalance(PHANTHY, credential, fetch, process.cwd() + '/data'),
             persistBalance: (account, balance, error) => persistCreditBalance(pool, account, balance, error),
             warn: (msg) => ctx.logger?.warn?.(msg),
           })
