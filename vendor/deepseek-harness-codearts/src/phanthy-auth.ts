@@ -88,12 +88,12 @@ export class PhanthyAuth extends Service {
   /** 启动 PKCE 登录：返回授权页 URL。 */
   async startLogin(): Promise<StartedPhanthyLogin> {
     const pkce = createPhanthyPkceState()
-    const redirectUri = 'urn:ietf:wg:oauth:2.0:oob'
+    const redirectUri = 'https://code.phanthy.com/oauth/code/success'
     const url = new URL(`${this.product.apiBase}/oauth/authorize`)
     url.searchParams.set('client_id', PHANTHY_CLIENT_ID)
     url.searchParams.set('response_type', 'code')
     url.searchParams.set('redirect_uri', redirectUri)
-    url.searchParams.set('scope', 'openid profile email offline_access')
+    url.searchParams.set('scope', 'user:inference user:profile user:sessions:claude_code')
     url.searchParams.set('code_challenge', pkce.challenge)
     url.searchParams.set('code_challenge_method', 'S256')
     url.searchParams.set('state', pkce.state)
@@ -108,7 +108,7 @@ export class PhanthyAuth extends Service {
       code: code.trim(),
       client_id: PHANTHY_CLIENT_ID,
       code_verifier: verifier,
-      redirect_uri: 'urn:ietf:wg:oauth:2.0:oob',
+      redirect_uri: 'https://code.phanthy.com/oauth/code/success',
     })
     const token = await this.requestToken(body)
     const credential = this.credentialFromToken(token)
