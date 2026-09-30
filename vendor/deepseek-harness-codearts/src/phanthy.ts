@@ -25,6 +25,27 @@ export const PHANTHY_OAUTH_BETA = 'oauth-2025-04-20'
 export const PHANTHY_CLIENT_ID = 'phanthy-code-cli'
 
 /**
+ * 从用户输入中提取纯授权码。
+ *
+ * 参考实现要求 fragment 必须先剥离：OAuth 授权码本身不含 `#`，一旦把浏览器
+ * 地址栏里的 `#p2a-login` 一起发给 /oauth/token，上游会返回 invalid_grant。
+ */
+export function extractPhanthyCode(input: string): string {
+  const value = input.trim()
+  try {
+    const url = new URL(value)
+    const code = url.searchParams.get('code')
+    if (code) return code.trim()
+  } catch {
+    // 不是完整 URL 时继续按粘贴片段解析。
+  }
+  const withoutFragment = value.split('#', 1)[0] ?? ''
+  const codeIndex = withoutFragment.indexOf('code=')
+  const candidate = codeIndex >= 0 ? withoutFragment.slice(codeIndex + 'code='.length) : withoutFragment
+  return candidate.split(/[&\s]/, 1)[0]?.trim() ?? ''
+}
+
+/**
  * 模型后缀规范化表。
  *
  * 用户可能沿用上游配置里的 `[1m]` / `[2m]` / `:1m` / `:2m` 后缀，真实模型 id

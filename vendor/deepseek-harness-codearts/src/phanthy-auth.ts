@@ -16,6 +16,7 @@ import {
   PHANTHY_OAUTH_BETA,
   PHANTHY_REQUEST_TIMEOUT_MS,
   decodePhanthyJwtExpMs,
+  extractPhanthyCode,
   isPhanthyExpired,
   isPhanthyRefreshable,
   parsePhanthyCredential,
@@ -103,9 +104,13 @@ export class PhanthyAuth extends Service {
   /** 用用户粘贴的授权码完成登录并落盘。 */
   async exchangeLogin(code: string, verifier: string, refName?: string): Promise<PhanthyLoginResult> {
     const ref = refName ?? this.credentialRefName
+    const authorizationCode = extractPhanthyCode(code)
+    if (authorizationCode.length === 0) {
+      throw new Error('授权码为空，请粘贴完整回调地址或纯授权码')
+    }
     const body = new URLSearchParams({
       grant_type: 'authorization_code',
-      code: code.trim(),
+      code: authorizationCode,
       client_id: PHANTHY_CLIENT_ID,
       code_verifier: verifier,
       redirect_uri: 'https://code.phanthy.com/oauth/code/success',
