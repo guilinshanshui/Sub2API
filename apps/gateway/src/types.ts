@@ -17,7 +17,7 @@ export type ProviderId = typeof PROVIDER_IDS[number]
 export const PROVIDER_NAMES: Record<ProviderId, string> = {
   codearts: '华为 CodeArts',
   buddy: '腾讯 CodeBuddy',
-  workbuddy: 'WorkBuddy',
+  workbuddy: 'WorkBuddy (国际版)',
   lobsterai: '有道 LobsterAI',
   qoder: 'Qoder',
   qodercn: 'Qoder 中国版',

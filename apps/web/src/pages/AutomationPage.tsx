@@ -32,7 +32,7 @@ const STATUS_TONES: Record<AutomationStatus['runs'][number]['status'], 'success'
 const SIGNIN_COVERAGE = [
   { id: 'codearts', name: '华为 CodeArts' },
   { id: 'buddy', name: '腾讯 CodeBuddy' },
-  { id: 'workbuddy', name: 'WorkBuddy' },
+  { id: 'workbuddy', name: 'WorkBuddy (国际版)' },
   { id: 'lobsterai', name: '有道 LobsterAI' },
   { id: 'qoder', name: 'Qoder' },
   { id: 'qodercn', name: 'Qoder 中国版' },

@@ -157,10 +157,13 @@ function latestBalance(account: ProviderAccount): BalanceSummary | undefined {
       const total = typeof record.total === 'number' ? record.total : Number(record.amount)
       const queriedAt = typeof record.queriedAt === 'number' ? record.queriedAt : 0
       const detail = parsePhanthyDetail(record.detail)
-      const packages = Array.isArray(record.packages)
-        ? record.packages.filter((entry): entry is Record<string, unknown> => typeof entry === 'object' && entry !== null)
-        : []
-      const expiredTotal = asFiniteNumber(record.expiredTotal)
+      const detailRecord = record.detail === undefined || typeof record.detail !== 'object' || record.detail === null
+        ? undefined
+        : record.detail as Record<string, unknown>
+      const packageSource = Array.isArray(record.packages) ? record.packages : Array.isArray(detailRecord?.packages) ? detailRecord?.packages : []
+      const packages = packageSource
+        .filter((entry): entry is Record<string, unknown> => typeof entry === 'object' && entry !== null)
+      const expiredTotal = asFiniteNumber(record.expiredTotal) ?? asFiniteNumber(detailRecord?.expiredTotal)
       if (!Number.isFinite(total) || record.lastError !== undefined) return []
       return [{
         total,
