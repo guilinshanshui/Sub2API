@@ -1374,7 +1374,7 @@ function registerJetHubEndpoints(
             createdAt: Date.now(),
           })
           pendingPhanthyPkce.set(id, started.verifier)
-          return { ok: true, value: { accountId: id, loginUrl: started.loginUrl, loginMode: 'url' } }
+          return { ok: true, value: { accountId: id, loginUrl: started.loginUrl, loginMode: 'code' } }
         } else {
           return { ok: false, error: { code: 'bad-request', message: `unknown provider: ${provider}` } }
         }
@@ -2037,6 +2037,7 @@ function registerJetHubEndpoints(
             try {
               credential = JSON.parse(resolved.value) as QoderCredential
             } catch {
+              await persistCreditBalance(pool, account, null, '凭据解析失败')
               values.push({
                 accountId: account.id, nickname: account.nickname,
                 balance: null, error: '凭据解析失败',
@@ -2044,6 +2045,12 @@ function registerJetHubEndpoints(
               continue
             }
             const balance = await fetchQoderCreditBalance(credential, product)
+            await persistCreditBalance(
+              pool,
+              account,
+              balance,
+              ...(balance === null ? ['积分查询失败（凭据失效或响应异常）'] as const : []) as [string?],
+            )
             values.push({
               accountId: account.id,
               nickname: account.nickname,

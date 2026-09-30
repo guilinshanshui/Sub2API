@@ -2446,6 +2446,19 @@ th.actions {
   font-size: 11px;
 }
 
+.oauth-url {
+  min-height: 108px;
+  line-height: 1.5;
+  word-break: break-all;
+  resize: vertical;
+}
+
+.oauth-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .task-list {
   display: grid;
   gap: 7px;

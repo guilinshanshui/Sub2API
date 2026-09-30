@@ -379,6 +379,8 @@ export function AccountsPage() {
       setAddOpen(false)
       notify('账号登录成功。', 'success')
       await load(true)
+      await refreshAccountCredits(login.accountId, login.provider)
+      await load(true)
     } catch (reason) {
       notify(errorText(reason), 'error')
     }
@@ -822,16 +824,34 @@ export function AccountsPage() {
             <div className="login-progress">
               <div>
                 <strong>PhanthyCode 授权码</strong>
-                <p>在授权页完成登录后，粘贴返回的授权码。</p>
+                <p>先生成并打开授权链接；授权成功后，把浏览器显示的授权码粘贴到下面。</p>
               </div>
-              <a className="login-link" href={login.loginUrl} target="_blank" rel="noreferrer">
-                <ExternalLink size={14} />
-                打开授权页
-              </a>
             </div>
             <label className="field">
-              <span>授权码</span>
-              <input value={login.code} onChange={(event) => setLogin({ ...login, code: event.target.value })} placeholder="粘贴授权码" autoFocus />
+              <span>授权链接</span>
+              <textarea className="oauth-url" readOnly value={login.loginUrl} onFocus={(event) => event.currentTarget.select()} />
+            </label>
+            <div className="oauth-actions">
+              <button className="btn btn-secondary" type="button" onClick={() => window.open(login.loginUrl, '_blank', 'noopener,noreferrer')}>
+                <ExternalLink size={14} />
+                打开链接
+              </button>
+              <button
+                className="btn btn-secondary"
+                type="button"
+                onClick={() => void navigator.clipboard.writeText(login.loginUrl).then(() => notify('授权链接已复制。', 'success')).catch(() => notify('复制失败，请手动选择链接。', 'error'))}
+              >
+                复制链接
+              </button>
+            </div>
+            <label className="field">
+              <span>授权码（Authorization code）</span>
+              <textarea
+                value={login.code}
+                onChange={(event) => setLogin({ ...login, code: event.target.value })}
+                placeholder="粘贴浏览器里显示的 code"
+                autoFocus
+              />
             </label>
           </div>
         ) : login.loginMode === 'sms' ? (
