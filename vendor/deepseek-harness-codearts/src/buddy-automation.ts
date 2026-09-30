@@ -504,14 +504,10 @@ async function runAccountJob(
   }
 }
 
-function requireCn(account: AutomationAccount): void {
-  if (account.provider !== CODEBUDDY.id) {
-    throw new Error('国际版账号没有国内成长任务')
-  }
-}
-
 async function runCnDaily(deps: AutomationDeps, jobId: string, account: AutomationAccount, startedAt: number): Promise<AutomationRunRecord> {
-  requireCn(account)
+  if (account.provider !== CODEBUDDY.id) {
+    return makeRun(jobId, account.id, 'skipped', startedAt, '国际版账号，跳过国内任务')
+  }
   const details: Record<string, unknown> = {}
   let message = ''
 
@@ -564,7 +560,9 @@ async function runIntlDaily(deps: AutomationDeps, jobId: string, account: Automa
 }
 
 async function runNightOwl(deps: AutomationDeps, jobId: string, account: AutomationAccount, startedAt: number): Promise<AutomationRunRecord> {
-  requireCn(account)
+  if (account.provider !== CODEBUDDY.id) {
+    return makeRun(jobId, account.id, 'skipped', startedAt, '国际版账号，跳过夜猫任务')
+  }
   const { time } = currentShanghaiTime()
   const hourNumber = Number(time.slice(0, 2))
   if (!(hourNumber >= 23 || hourNumber < 8)) {

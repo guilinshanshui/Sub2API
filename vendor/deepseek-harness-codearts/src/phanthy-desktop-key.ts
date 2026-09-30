@@ -43,7 +43,7 @@ function sanitizeUid(uid: string): string {
   return clean.length > 0 ? clean : 'default'
 }
 
-/** 计算安装 id：`di_` + b64url(sha256(SPKI DER))。 */
+/** 计算安装 id：`di_` + b64url(sha256(原始 32 字节公钥))。 */
 export function phanthyInstallationIdFromSeed(seed: Buffer): string {
   const publicKey = createPublicKey(createPrivateKey({
     key: Buffer.concat([ED25519_SEED_PKCS8_PREFIX, seed]),
@@ -51,7 +51,8 @@ export function phanthyInstallationIdFromSeed(seed: Buffer): string {
     type: 'pkcs8',
   }))
   const spki = publicKey.export({ format: 'der', type: 'spki' })
-  const digest = createHash('sha256').update(spki).digest()
+  const rawPublicKey = Buffer.from(spki).subarray(ED25519_SPKI_PREFIX.length)
+  const digest = createHash('sha256').update(rawPublicKey).digest()
   return `di_${b64url(digest)}`
 }
 
@@ -96,9 +97,7 @@ export async function loadOrCreatePhanthyDesktopIdentity(
   }
 
   const seed = Buffer.from(keyFile.seed_hex, 'hex')
-  const installationId = keyFile.installation_id.length > 0
-    ? keyFile.installation_id
-    : phanthyInstallationIdFromSeed(seed)
+  const installationId = phanthyInstallationIdFromSeed(seed)
   return { installationId, privateKey: phanthyPrivateKeyFromSeed(seed) }
 }
 
