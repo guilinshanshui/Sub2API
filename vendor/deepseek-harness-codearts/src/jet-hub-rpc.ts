@@ -33,6 +33,7 @@ import { PHANTHY } from './phanthy-product.js'
 import type { PhanthyAuth } from './phanthy-auth.js'
 import {
   fetchPhanthyActivitiesSummary,
+  type PhanthyCreditDetail,
 } from './phanthy-credits.js'
 import { phanthyCredentialExpiresAtMs } from './phanthy.js'
 import type { PhanthyCredential } from './phanthy.js'
@@ -611,6 +612,7 @@ async function persistCreditBalance(
   entry: ProviderAccountEntry,
   balance: CreditBalance | null,
   error?: string,
+  detail?: unknown,
 ): Promise<void> {
   const now = Date.now()
   const previous = entry.balanceSnapshots?.credits
@@ -622,6 +624,7 @@ async function persistCreditBalance(
         queriedAt: balance === null ? previous?.queriedAt ?? now : now,
         lastAttemptAt: now,
         ...(error === undefined || error.length === 0 ? {} : { lastError: error }),
+        ...(detail === undefined || typeof detail !== 'object' ? {} : { detail }),
       },
     },
   })
@@ -1482,6 +1485,15 @@ function registerJetHubEndpoints(
               // PhanthyCode 有 refresh 端点（refresh_token 轮换），这里是真续期。
               // 与 raccoon 同因：必须传 pool + entry.id，把新 expiresAt 写回账号池。
               await phanthy.refreshAccountCredential(entry.credentialRef, pool, entry.id)
+              // 续期后顺手刷新余额：access token 寿命短，积分卡片希望拿到最新值。
+              {
+                const resolved = await ctx.credentials.resolve(credentialRef(entry.credentialRef))
+                if (resolved !== undefined) {
+                  const credential = JSON.parse(resolved.value) as PhanthyCredential
+                  const detailed = await phanthy.fetchCreditBalanceDetailed(credential)
+                  await persistCreditBalance(pool, entry, detailed.balance, detailed.error)
+                }
+              }
               break
             default:
               throw new Error(`Unknown provider: ${entry.provider}`)
@@ -1918,7 +1930,8 @@ function registerJetHubEndpoints(
               const resolved = await ctx.credentials.resolve(credentialRef(entry.credentialRef))
               if (resolved !== undefined) {
                 const credential = JSON.parse(resolved.value) as PhanthyCredential
-                const summary = await fetchPhanthyActivitiesSummary(PHANTHY, credential, fetch)
+                const result = await phanthy.fetchActivitiesSummaryDetailed(credential)
+                const summary = result.summary
                 if (summary !== null) {
                   status = {
                     active: summary.feature_flags?.daily_enabled !== false,
@@ -2181,13 +2194,40 @@ function registerJetHubEndpoints(
           return { ok: true, value: { accounts: values } satisfies RpcCreditsBalancesResponse }
         }
         if (req.provider === PHANTHY.id) {
-          // 余额来自 `GET /api/oauth/activities/summary`（只读）。
-          const values = await collectCreditBalances<PhanthyCredential, undefined>(accounts, undefined, {
-            resolve: (ref) => ctx.credentials.resolve(ref),
-            fetchBalanceDetailed: (credential) => phanthy.fetchCreditBalanceDetailed(credential),
-            persistBalance: (account, balance, error) => persistCreditBalance(pool, account, balance, error),
-            warn: (msg) => ctx.logger?.warn?.(msg),
-          })
+          // 余额 + 官网钱包明细 + 每日开工奖励台账。
+          // summary 需要桌面身份签名；usage/rewards 是普通授权 GET，全部逐号顺序请求。
+          const values: RpcCreditsBalancesResponse['accounts'] = []
+          for (const account of accounts) {
+            const resolved = await ctx.credentials.resolve(credentialRef(account.credentialRef))
+            if (!resolved) {
+              await persistCreditBalance(pool, account, null, '凭据未配置')
+              values.push({ accountId: account.id, nickname: account.nickname, balance: null, error: '凭据未配置' })
+              continue
+            }
+            let credential: PhanthyCredential
+            try {
+              credential = JSON.parse(resolved.value) as PhanthyCredential
+            } catch {
+              await persistCreditBalance(pool, account, null, '凭据解析失败')
+              values.push({ accountId: account.id, nickname: account.nickname, balance: null, error: '凭据解析失败' })
+              continue
+            }
+            const result = await phanthy.fetchCreditDetailDetailed(credential)
+            await persistCreditBalance(
+              pool,
+              account,
+              result.balance,
+              result.error,
+              result.detail === undefined ? undefined : result.detail,
+            )
+            values.push({
+              accountId: account.id,
+              nickname: account.nickname,
+              balance: result.balance,
+              ...result.error === undefined ? {} : { error: result.error },
+              ...result.detail === undefined ? {} : { detail: result.detail },
+            })
+          }
           return { ok: true, value: { accounts: values } satisfies RpcCreditsBalancesResponse }
         }
         const product = productById(req.provider)

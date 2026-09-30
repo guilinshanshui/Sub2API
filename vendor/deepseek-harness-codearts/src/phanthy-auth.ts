@@ -30,8 +30,11 @@ import { PHANTHY, type PhanthyProduct } from './phanthy-product.js'
 import {
   fetchPhanthyCreditBalance,
   fetchPhanthyCreditBalanceDetailed,
+  fetchPhanthyCreditDetail,
+  type PhanthyCreditDetail,
   uidFromAccessToken,
   claimPhanthyDailyLogin,
+  fetchPhanthyActivitiesSummaryDetailed,
 } from './phanthy-credits.js'
 import { readPhanthyJson } from './phanthy-runtime.js'
 import { syncAccountExpiry, type ExpiryAccessors } from './expiry-sync.js'
@@ -252,6 +255,33 @@ export class PhanthyAuth extends Service {
     }
   }
 
+  /**
+   * 读取钱包与开工奖励明细；access token 近到期或被拒绝时自动续期一次。
+   *
+   * 附属端点部分失败时仍返回可用明细，errors 保留具体原因。
+   */
+  async fetchCreditDetailDetailed(credential: PhanthyCredential): Promise<{
+    detail: PhanthyCreditDetail | null
+    balance: CreditBalance | null
+    error?: string
+  }> {
+    const first = await fetchPhanthyCreditDetail(this.product, credential, this.fetcher, this.dataDir)
+    if (first.error === undefined) return first
+    if (!isPhanthyRefreshable(credential)) return first
+    if (!this.isAccessTokenStale(credential) && !this.isCredentialRejected(first.error)) return first
+    try {
+      const refreshed = await this.refreshCredentialValue(credential)
+      await this.persistRefreshedCredential(refreshed)
+      return await fetchPhanthyCreditDetail(this.product, refreshed, this.fetcher, this.dataDir)
+    } catch (error) {
+      return {
+        detail: first.detail,
+        balance: first.balance,
+        error: error instanceof Error ? error.message : String(error),
+      }
+    }
+  }
+
   /** 领取每日登录奖励。 */
   async claimDailyLogin(credential: PhanthyCredential): Promise<ClaimOutcome> {
     return claimPhanthyDailyLogin(this.product, credential, this.dataDir, this.fetcher)
@@ -268,6 +298,34 @@ export class PhanthyAuth extends Service {
       return await claimPhanthyDailyLogin(this.product, refreshed, this.dataDir, this.fetcher)
     } catch (error) {
       return { kind: 'failed', code: -1, message: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
+  /** 读取活动状态；近到期或凭据被拒绝时自动续期一次并重试。 */
+  async fetchActivitiesSummaryDetailed(credential: PhanthyCredential): Promise<{
+    summary: import('./phanthy-credits.js').PhanthyActivitiesSummary | null
+    error?: string
+  }> {
+    const first = await fetchPhanthyActivitiesSummaryDetailed(
+      this.product,
+      credential,
+      this.fetcher,
+      this.dataDir,
+    )
+    if (first.summary !== null) return first
+    if (!isPhanthyRefreshable(credential)) return first
+    if (!this.isAccessTokenStale(credential) && !this.isCredentialRejected(first.error)) return first
+    try {
+      const refreshed = await this.refreshCredentialValue(credential)
+      await this.persistRefreshedCredential(refreshed)
+      return await fetchPhanthyActivitiesSummaryDetailed(
+        this.product,
+        refreshed,
+        this.fetcher,
+        this.dataDir,
+      )
+    } catch (error) {
+      return { summary: null, error: error instanceof Error ? error.message : String(error) }
     }
   }
 

@@ -276,6 +276,8 @@ export interface CreditsBalanceAccount {
     packages?: Array<Record<string, unknown>>
   } | null
   error?: string
+  /** PhanthyCode 特有的钱包与开工奖励明细。 */
+  detail?: Record<string, unknown>
 }
 
 export interface OnboardingStatus {

@@ -82,6 +82,50 @@ function expirationDetail(account: ProviderAccount): string {
 interface BalanceSummary {
   total: number
   queriedAt: number
+  detail?: PhanthyWalletDetail
+}
+
+interface PhanthyWalletPool {
+  key?: unknown
+  label?: unknown
+  total?: unknown
+  remaining?: unknown
+  used?: unknown
+  lots?: unknown
+  expiresAt?: unknown
+  estimate?: unknown
+}
+
+interface PhanthyWalletDetail {
+  wallet?: {
+    pools?: unknown
+    remaining?: unknown
+    used?: unknown
+    approximate?: unknown
+    pending?: unknown
+  }
+  daily?: {
+    grantedToday?: unknown
+    todayPoints?: unknown
+    streakDays?: unknown
+    totalGranted?: unknown
+  }
+  planName?: unknown
+  planExpiresAt?: unknown
+}
+
+function asFiniteNumber(value: unknown): number | undefined {
+  const parsed = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(parsed) ? parsed : undefined
+}
+
+function asString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined
+}
+
+function parsePhanthyDetail(value: unknown): PhanthyWalletDetail | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  return value as PhanthyWalletDetail
 }
 
 function latestBalance(account: ProviderAccount): BalanceSummary | undefined {
@@ -93,8 +137,9 @@ function latestBalance(account: ProviderAccount): BalanceSummary | undefined {
       const record = value as Record<string, unknown>
       const total = typeof record.total === 'number' ? record.total : Number(record.amount)
       const queriedAt = typeof record.queriedAt === 'number' ? record.queriedAt : 0
+      const detail = parsePhanthyDetail(record.detail)
       if (!Number.isFinite(total) || record.lastError !== undefined) return []
-      return [{ total, queriedAt }]
+      return [{ total, queriedAt, ...(detail === undefined ? {} : { detail }) }]
     })
     .sort((left, right) => right.queriedAt - left.queriedAt)
   return values[0]
@@ -102,6 +147,73 @@ function latestBalance(account: ProviderAccount): BalanceSummary | undefined {
 
 function accountRateLimitCount(account: ProviderAccount): number {
   return Object.values(account.modelRateLimits ?? {}).filter((value) => value > Date.now()).length
+}
+
+function phanthyRewardLine(detail: PhanthyWalletDetail | undefined): string | undefined {
+  const daily = detail?.daily
+  if (typeof daily !== 'object' || daily === null) return undefined
+  const todayPoints = asFiniteNumber(daily.todayPoints)
+  const streakDays = asFiniteNumber(daily.streakDays)
+  const totalGranted = asFiniteNumber(daily.totalGranted)
+  if (todayPoints === undefined && streakDays === undefined && totalGranted === undefined) return undefined
+  const grantedToday = daily.grantedToday === true
+  const parts = [grantedToday ? '今日已到账' : '今日未到账']
+  if (todayPoints !== undefined && todayPoints > 0) parts.push(`今日 +${formatNumber(todayPoints)}`)
+  if (streakDays !== undefined) parts.push(`连续 ${formatNumber(streakDays)} 天`)
+  if (totalGranted !== undefined) parts.push(`累计 ${formatNumber(totalGranted)}`)
+  return parts.join(' · ')
+}
+
+function PhanthyCreditDetails({ detail }: { detail: PhanthyWalletDetail | undefined }) {
+  if (detail === undefined) return null
+  const wallet = detail.wallet
+  const pools = Array.isArray(wallet?.pools)
+    ? wallet?.pools.filter((pool): pool is PhanthyWalletPool => typeof pool === 'object' && pool !== null)
+    : []
+  const rewardLine = phanthyRewardLine(detail)
+  const planName = asString(detail.planName)
+  const planExpiresAt = asString(detail.planExpiresAt)
+  const pending = asFiniteNumber(wallet?.pending)
+  const approximate = wallet?.approximate === true
+  const rewardPools = pools.filter((pool) => pool.key !== 'plan')
+  if (pools.length === 0 && rewardLine === undefined && planName === undefined && pending === undefined) return null
+  return (
+    <div className="phanthy-credit-details">
+      {rewardLine === undefined ? null : <div className="phanthy-reward-line">{rewardLine}</div>}
+      {pools.map((pool, index) => {
+        const label = asString(pool.label) ?? '额度池'
+        const remaining = asFiniteNumber(pool.remaining)
+        const total = asFiniteNumber(pool.total)
+        const used = asFiniteNumber(pool.used)
+        const expiry = asString(pool.expiresAt)
+        const lots = asFiniteNumber(pool.lots)
+        const percent = remaining !== undefined && total !== undefined && total > 0
+          ? Math.max(0, Math.min(100, Math.round((remaining / total) * 100)))
+          : undefined
+        const subParts = [
+          used !== undefined ? `已用 ${formatNumber(used)}` : undefined,
+          expiry !== undefined ? `${Number.isFinite(Date.parse(expiry)) ? new Date(expiry).toLocaleDateString() : expiry} 到期` : undefined,
+          lots !== undefined && lots > 1 ? `${formatNumber(lots)} 批` : undefined,
+          pool.estimate === true ? '估算' : undefined,
+        ].filter((item): item is string => item !== undefined)
+        return (
+          <div key={`${label}-${index}`} className="phanthy-pool">
+            <div className="phanthy-pool-top">
+              <span>{label}</span>
+              <strong>{formatNumber(remaining ?? 0)}{total === undefined ? '' : ` / ${formatNumber(total)}`}</strong>
+            </div>
+            {percent === undefined ? null : (
+              <div className="phanthy-pool-bar" aria-hidden="true"><span style={{ width: `${percent}%` }} /></div>
+            )}
+            {subParts.length === 0 ? null : <div className="phanthy-pool-sub">{subParts.join(' · ')}{approximate ? ' · 已用为估算' : ''}</div>}
+          </div>
+        )
+      })}
+      {pending === undefined || pending <= 0 ? null : <div className="phanthy-pool-sub">待发放 {formatNumber(pending)}</div>}
+      {planExpiresAt === undefined ? null : <div className="phanthy-pool-sub">{planName ?? '套餐'} 到期 {planExpiresAt}</div>}
+      {rewardPools.length === 0 && rewardLine !== undefined ? null : null}
+    </div>
+  )
 }
 
 function cooldownRemainingText(account: ProviderAccount): string | undefined {
@@ -705,6 +817,14 @@ export function AccountsPage() {
                         {(account.reserveCredits ?? 0) > 0 ? <Badge tone="warning">保留 {account.reserveCredits}</Badge> : null}
                       </div>
                     </div>
+                    {balance?.detail === undefined ? null : (
+                      <div className="account-detail-row account-detail-row-wide">
+                        <span className="account-detail-label">明细</span>
+                        <div className="account-detail-value">
+                          <PhanthyCreditDetails detail={balance.detail} />
+                        </div>
+                      </div>
+                    )}
                     {rateLimits === 0 ? null : (
                       <div className="account-detail-row">
                         <span className="account-detail-label">限流</span>

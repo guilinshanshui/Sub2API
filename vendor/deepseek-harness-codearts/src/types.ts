@@ -48,6 +48,13 @@ export interface AccountBalanceSnapshot {
   lastAttemptAt: number
   /** 最近一次失败原因；成功查询后清空。 */
   lastError?: string
+  /**
+   * 服务商特有积分明细。
+   *
+   * 目前只有 PhanthyCode 使用：钱包分池与每日开工奖励台账。保留为
+   * unknown 是因为不同上游返回的池结构不同，写入前由各 provider 校验。
+   */
+  detail?: unknown
 }
 
 /** 账号索引条目（存于 ctx.settings，非 credentials） */

@@ -289,6 +289,9 @@ function sanitizeBalanceSnapshots(
       ...(typeof candidate.lastError === 'string' && candidate.lastError.length > 0
         ? { lastError: candidate.lastError }
         : {}),
+      ...(typeof candidate.detail === 'object' && candidate.detail !== null && !Array.isArray(candidate.detail)
+        ? { detail: candidate.detail }
+        : {}),
     }
   }
   return Object.keys(result).length > 0 ? result : undefined

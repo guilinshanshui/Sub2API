@@ -134,6 +134,445 @@ export function parsePhanthyCreditBalance(summary: PhanthyActivitiesSummary): Cr
   }
 }
 
+/** 钱包里的一个额度池（套餐或某类奖励批次聚合）。 */
+export interface PhanthyWalletPool {
+  key: string
+  label: string
+  total: number
+  remaining: number
+  used: number
+  lots?: number
+  /** ISO 时间；套餐是重置时间，奖励是最近到期批次。 */
+  expiresAt?: string
+  /** 奖励池的已用为 FIFO 估算。 */
+  estimate?: boolean
+}
+
+/** 官网「套餐」页风格的钱包视图。 */
+export interface PhanthyWallet {
+  pools: PhanthyWalletPool[]
+  total: number
+  remaining: number
+  used: number
+  approximate: boolean
+  pending: number
+}
+
+/** 每日开工奖励的台账 + summary 合并视图。 */
+export interface PhanthyDailyReward {
+  /** 北京时间业务日，如 2026-09-30。 */
+  today?: string
+  grantedToday: boolean
+  todayPoints: number
+  streakDays: number
+  totalGranted: number
+  grantedDays?: number
+  lastGrantedAt?: string
+  nextPoints?: number
+  source: 'ledger' | 'summary' | 'none'
+}
+
+/** PhanthyCode 特有的积分明细，进入账号池快照与备份链路。 */
+export interface PhanthyCreditDetail {
+  wallet: PhanthyWallet
+  daily: PhanthyDailyReward
+  planName?: string
+  planExpiresAt?: string
+  /** 单个附属端点失败时仍尽量返回可用数据。 */
+  errors?: string[]
+}
+
+interface PhanthyCreditLot {
+  kind: string
+  points: number
+  used: number
+  grantedAt?: Date
+  expiresAt?: Date
+}
+
+const PHANTHY_REWARD_LABELS: Record<string, string> = {
+  daily_login: '每日登录奖励',
+  long_task_feedback: '活动奖励',
+  token_factory_activation: '代币工厂奖励',
+  referral_inviter: '推荐奖励',
+}
+
+function toFiniteNumber(value: unknown): number | undefined {
+  const num = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(num) ? num : undefined
+}
+
+function parsePhanthyTime(value: unknown): Date | undefined {
+  if (typeof value !== 'string' || value.length === 0) return undefined
+  const parsed = new Date(value)
+  return Number.isNaN(parsed.getTime()) ? undefined : parsed
+}
+
+/** 上游按北京时间划分业务日。 */
+export function phanthyBusinessDate(date: Date): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(date)
+}
+
+function phanthyMidnight(date: Date): Date {
+  return new Date(`${phanthyBusinessDate(date)}T00:00:00+08:00`)
+}
+
+function isDailyLoginReward(reward: Record<string, unknown>): boolean {
+  return ['reward_type', 'reward_code', 'reason_code'].some(
+    (key) => reward[key] === 'daily_login',
+  )
+}
+
+/** 台账里的每日开工奖励：今日到账、连续天数与累计。 */
+export function analyzePhanthyDailyRewards(
+  rewards: readonly Record<string, unknown>[],
+  now: Date = new Date(),
+): PhanthyDailyReward {
+  const pointsByDay = new Map<string, number>()
+  let lastGranted: Date | undefined
+  let lastPoints = 0
+  let totalGranted = 0
+
+  for (const reward of rewards) {
+    if (!isDailyLoginReward(reward) || reward.status !== 'granted') continue
+    const points = toFiniteNumber(reward.points)
+    if (points === undefined || points <= 0) continue
+    const grantedAt = parsePhanthyTime(reward.granted_at)
+    if (grantedAt === undefined) continue
+    const day = phanthyBusinessDate(grantedAt)
+    pointsByDay.set(day, (pointsByDay.get(day) ?? 0) + points)
+    totalGranted += points
+    if (lastGranted === undefined || grantedAt.getTime() > lastGranted.getTime()) {
+      lastGranted = grantedAt
+      lastPoints = points
+    }
+  }
+
+  const today = phanthyBusinessDate(now)
+  let cursor = phanthyMidnight(now)
+  if (!pointsByDay.has(phanthyBusinessDate(cursor))) {
+    cursor = new Date(cursor.getTime() - 24 * 60 * 60 * 1000)
+  }
+  let streakDays = 0
+  while (pointsByDay.has(phanthyBusinessDate(cursor))) {
+    streakDays += 1
+    cursor = new Date(cursor.getTime() - 24 * 60 * 60 * 1000)
+  }
+
+  return {
+    today,
+    grantedToday: pointsByDay.has(today),
+    todayPoints: pointsByDay.get(today) ?? 0,
+    streakDays,
+    totalGranted,
+    grantedDays: pointsByDay.size,
+    ...(lastGranted === undefined ? {} : { lastGrantedAt: lastGranted.toISOString() }),
+    source: rewards.length > 0 ? 'ledger' : 'none',
+  }
+}
+
+function extractPhanthyUsage(raw: Record<string, unknown>): Record<string, unknown> {
+  const plan = raw.current_plan ?? raw.seven_day
+  if (typeof plan !== 'object' || plan === null) return {}
+  const source = plan as Record<string, unknown>
+  return {
+    credits_remaining: source.remaining_credits,
+    credits_total: source.total_credits,
+    credits_used: source.used_credits,
+    credits_reset_at: source.resets_at,
+  }
+}
+
+interface PhanthyUsageDay {
+  start: Date
+  end: Date
+  cost: number
+}
+
+function phanthyUsageDays(summary: Record<string, unknown> | undefined): PhanthyUsageDay[] {
+  const rows = summary?.usage_by_day_and_model
+  if (!Array.isArray(rows)) return []
+  const days = new Map<string, PhanthyUsageDay>()
+  for (const row of rows) {
+    if (typeof row !== 'object' || row === null) continue
+    const item = row as Record<string, unknown>
+    const date = typeof item.date === 'string' ? item.date : ''
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) continue
+    const start = new Date(`${date}T00:00:00Z`)
+    if (Number.isNaN(start.getTime())) continue
+    const bucket = days.get(date) ?? { start, end: new Date(start.getTime() + 86_400_000), cost: 0 }
+    bucket.cost += toFiniteNumber(item.cost_points) ?? 0
+    days.set(date, bucket)
+  }
+  return [...days.values()]
+}
+
+function lotOrderKey(lot: PhanthyCreditLot): number {
+  return lot.grantedAt?.getTime() ?? lot.expiresAt?.getTime() ?? 0
+}
+
+function chargePhanthyLots(lots: PhanthyCreditLot[], days: readonly PhanthyUsageDay[]): void {
+  for (const day of days) {
+    let remaining = day.cost
+    for (const lot of lots) {
+      if (remaining <= 0) break
+      if (lot.expiresAt !== undefined && lot.expiresAt.getTime() <= day.start.getTime()) continue
+      if (lot.grantedAt !== undefined && lot.grantedAt.getTime() >= day.end.getTime()) continue
+      const capacity = lot.points - lot.used
+      if (capacity <= 0) continue
+      const take = Math.min(remaining, capacity)
+      lot.used += take
+      remaining -= take
+    }
+  }
+}
+
+/** 套餐 + 奖励批次组合成钱包视图；奖励池按 FIFO 消耗估算已用。 */
+export function buildPhanthyWallet(
+  usage: Record<string, unknown>,
+  rewards: readonly Record<string, unknown>[],
+  usageSummary: Record<string, unknown> | undefined,
+  planName?: string,
+): PhanthyWallet {
+  const pools: PhanthyWalletPool[] = []
+  const extracted = extractPhanthyUsage(usage)
+  const remaining = toFiniteNumber(extracted.credits_remaining)
+  if (remaining !== undefined) {
+    const total = toFiniteNumber(extracted.credits_total) ?? remaining
+    const used = toFiniteNumber(extracted.credits_used) ?? 0
+    pools.push({
+      key: 'plan',
+      label: planName?.length ? planName : '套餐额度',
+      total,
+      remaining,
+      used,
+      lots: 1,
+    ...(typeof extracted.credits_reset_at === 'string' && extracted.credits_reset_at
+      ? { expiresAt: extracted.credits_reset_at }
+        : {}),
+    })
+  }
+
+  const lots: PhanthyCreditLot[] = []
+  let pending = 0
+  for (const reward of rewards) {
+    const points = toFiniteNumber(reward.points)
+    if (points === undefined || points <= 0) continue
+    const status = typeof reward.status === 'string' ? reward.status : ''
+    if (status !== 'granted') {
+      if (status === 'pending') pending += points
+      continue
+    }
+    const kind = typeof reward.reward_type === 'string' && reward.reward_type
+      ? reward.reward_type
+      : 'other'
+    lots.push({
+      kind,
+      points,
+      used: 0,
+      ...(parsePhanthyTime(reward.granted_at) === undefined ? {} : { grantedAt: parsePhanthyTime(reward.granted_at) }),
+      ...(parsePhanthyTime(reward.expires_at) === undefined ? {} : { expiresAt: parsePhanthyTime(reward.expires_at) }),
+    })
+  }
+  if (lots.length > 0) {
+    lots.sort((left, right) => lotOrderKey(left) - lotOrderKey(right))
+    chargePhanthyLots(lots, phanthyUsageDays(usageSummary))
+  }
+
+  const groups = new Map<string, { total: number; used: number; lots: number; earliest?: Date }>()
+  for (const lot of lots) {
+    if (lot.expiresAt !== undefined && lot.expiresAt.getTime() <= Date.now()) continue
+    const group = groups.get(lot.kind) ?? { total: 0, used: 0, lots: 0 }
+    group.total += lot.points
+    group.used += lot.used
+    group.lots += 1
+    if (lot.expiresAt !== undefined && (group.earliest === undefined || lot.expiresAt < group.earliest)) {
+      group.earliest = lot.expiresAt
+    }
+    groups.set(lot.kind, group)
+  }
+  for (const [kind, group] of [...groups.entries()].sort((left, right) => {
+    const leftTime = left[1].earliest?.getTime() ?? Number.MAX_SAFE_INTEGER
+    const rightTime = right[1].earliest?.getTime() ?? Number.MAX_SAFE_INTEGER
+    return leftTime - rightTime
+  })) {
+    pools.push({
+      key: kind,
+      label: PHANTHY_REWARD_LABELS[kind] ?? kind,
+      total: group.total,
+      remaining: group.total - group.used,
+      used: group.used,
+      lots: group.lots,
+      ...(group.earliest === undefined ? {} : { expiresAt: group.earliest.toISOString() }),
+      estimate: true,
+    })
+  }
+
+  const total = pools.reduce((sum, pool) => sum + pool.total, 0)
+  const left = pools.reduce((sum, pool) => sum + pool.remaining, 0)
+  return {
+    pools,
+    total,
+    remaining: left,
+    used: total - left,
+    approximate: pools.some((pool) => pool.estimate === true),
+    pending,
+  }
+}
+
+function mergePhanthyDailySummary(
+  ledger: PhanthyDailyReward,
+  summary: PhanthyActivitiesSummary,
+): PhanthyDailyReward {
+  const daily = summary.daily
+  const merged: PhanthyDailyReward = {
+    ...ledger,
+    today: daily?.server_date || ledger.today,
+    nextPoints: toFiniteNumber(daily?.next_points) ?? ledger.nextPoints,
+    source: daily === undefined ? ledger.source : 'summary',
+  }
+  const summaryStreak = toFiniteNumber(daily?.streak_days)
+  if (summaryStreak !== undefined && summaryStreak > 0) merged.streakDays = summaryStreak
+  if (daily?.status === 'granted_today') {
+    merged.grantedToday = true
+    const points = toFiniteNumber(daily.points)
+    if (points !== undefined && points > 0) merged.todayPoints = points
+  }
+  return merged
+}
+
+/** 附属 GET：普通授权请求，无需桌面签名。 */
+async function fetchPhanthyPlainJson(
+  product: PhanthyProduct,
+  credential: PhanthyCredential,
+  path: string,
+  fetcher: typeof fetch,
+): Promise<{ body?: Record<string, unknown>; error?: string }> {
+  try {
+    const response = await fetcher(`${product.apiBase}${path}`, {
+      method: 'GET',
+      headers: {
+        ...activityHeaders(credential, product),
+        'Content-Type': 'application/json',
+        'x-app': 'cli',
+      },
+      signal: AbortSignal.timeout(20_000),
+    })
+    const result = await readPhanthyJson<Record<string, unknown>>(response)
+    if (!result.ok) {
+      return {
+        error: `${path} 查询失败（HTTP ${result.status}）：${result.text.slice(0, 100)}`,
+      }
+    }
+    return { body: result.body }
+  } catch (error) {
+    return { error: `${path} 查询失败：${error instanceof Error ? error.message : String(error)}` }
+  }
+}
+
+/** 拉取奖励台账并自动翻页。 */
+export async function fetchPhanthyRewards(
+  product: PhanthyProduct,
+  credential: PhanthyCredential,
+  fetcher: typeof fetch,
+): Promise<{ rewards: Record<string, unknown>[]; error?: string }> {
+  const rewards: Record<string, unknown>[] = []
+  let cursor = ''
+  let firstError: string | undefined
+  for (let page = 0; page < 10; page += 1) {
+    const result = await fetchPhanthyPlainJson(
+      product,
+      credential,
+      cursor.length > 0 ? `/api/oauth/rewards?cursor=${encodeURIComponent(cursor)}` : '/api/oauth/rewards',
+      fetcher,
+    )
+    if (result.error !== undefined) {
+      firstError ??= result.error
+      break
+    }
+    const list = Array.isArray(result.body?.rewards) ? result.body?.rewards : []
+    for (const item of list) {
+      if (typeof item === 'object' && item !== null) rewards.push(item as Record<string, unknown>)
+    }
+    const next = typeof result.body?.next_cursor === 'string' ? result.body.next_cursor : ''
+    if (list.length === 0 || next.length === 0) break
+    cursor = next
+  }
+  return { rewards, ...(firstError === undefined ? {} : { error: firstError }) }
+}
+
+/**
+ * 一次读齐 PhanthyCode 积分明细。
+ *
+ * summary 需要桌面身份签名；usage / usage summary / rewards 是普通授权 GET。
+ * 任一附属端点失败不阻断其他数据，errors 里保留具体原因。
+ */
+export async function fetchPhanthyCreditDetail(
+  product: PhanthyProduct,
+  credential: PhanthyCredential,
+  fetcher: typeof fetch,
+  dataDir: string = join(process.cwd(), 'data'),
+): Promise<{ detail: PhanthyCreditDetail | null; balance: CreditBalance | null; error?: string }> {
+  const uid = credential.uid.trim().length > 0 ? credential.uid : uidFromAccessToken(credential.access_token)
+  if (uid.length === 0) return { detail: null, balance: null, error: '凭据缺少 uid 且无法从 access_token 解析' }
+  const errors: string[] = []
+
+  let summary: PhanthyActivitiesSummary | null = null
+  try {
+    const identity = await loadOrCreatePhanthyDesktopIdentity(uid, dataDir)
+    const registered = await ensurePhanthyDesktopInstallation(product, credential, identity, fetcher)
+    if (!registered.ok) {
+      errors.push(registered.message)
+    } else {
+      summary = await fetchPhanthyActivitiesSummary(product, credential, fetcher, dataDir)
+      if (summary === null) errors.push('活动状态查询失败')
+    }
+  } catch (error) {
+    errors.push(`桌面身份读取失败：${error instanceof Error ? error.message : String(error)}`)
+  }
+
+  const usageResult = await fetchPhanthyPlainJson(product, credential, '/api/oauth/usage', fetcher)
+  if (usageResult.error !== undefined) errors.push(usageResult.error)
+  const usageSummaryResult = await fetchPhanthyPlainJson(product, credential, '/api/oauth/usage/summary', fetcher)
+  if (usageSummaryResult.error !== undefined) errors.push(usageSummaryResult.error)
+  const rewardsResult = await fetchPhanthyRewards(product, credential, fetcher)
+  if (rewardsResult.error !== undefined) errors.push(rewardsResult.error)
+
+  const usage = extractPhanthyUsage(usageResult.body ?? {})
+  const usageSummary = usageSummaryResult.body
+  const plan = typeof usageSummary?.plan === 'object' && usageSummary.plan !== null
+    ? usageSummary.plan as Record<string, unknown>
+    : undefined
+  const planName = typeof plan?.name === 'string' && plan.name ? plan.name : undefined
+  const planExpiresAt = typeof plan?.expires_at === 'string' && plan.expires_at ? plan.expires_at : undefined
+  const wallet = buildPhanthyWallet(usage, rewardsResult.rewards, usageSummary, planName)
+  let daily = analyzePhanthyDailyRewards(rewardsResult.rewards)
+  if (summary !== null) daily = mergePhanthyDailySummary(daily, summary)
+
+  const available = toFiniteNumber(summary?.credits?.available)
+  const total = available ?? wallet.remaining
+  const detail: PhanthyCreditDetail = {
+    wallet,
+    daily,
+    ...(planName === undefined ? {} : { planName }),
+    ...(planExpiresAt === undefined ? {} : { planExpiresAt }),
+    ...(errors.length === 0 ? {} : { errors }),
+  }
+  const balance: CreditBalance = { total, packages: [], expiredTotal: 0 }
+  return {
+    detail,
+    balance,
+    ...(Number.isFinite(total) && (summary !== null || wallet.pools.length > 0)
+      ? {}
+      : { error: errors[0] ?? '积分数据不可用' }),
+  }
+}
+
 /** summary → CreditBalance 的便捷封装。 */
 export async function fetchPhanthyCreditBalance(
   product: PhanthyProduct,
