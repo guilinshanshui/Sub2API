@@ -616,6 +616,13 @@ async function persistCreditBalance(
 ): Promise<void> {
   const now = Date.now()
   const previous = entry.balanceSnapshots?.credits
+  // 通用积分包明细：CodeBuddy/Qoder/Trae/LobsterAI/Loomy/CodeArts/Raccoon
+  // 的余额都统一映射成 CreditBalance.packages，落盘后账号卡片才能离线展示
+  // 分池、已用与到期信息。Phanthy 的 detail 由调用方单独传入，优先保留。
+  const genericDetail = balance === null ? undefined : {
+    packages: balance.packages,
+    expiredTotal: balance.expiredTotal,
+  }
   await pool.updateAccount(entry.id, {
     balanceSnapshots: {
       ...(entry.balanceSnapshots ?? {}),
@@ -624,6 +631,7 @@ async function persistCreditBalance(
         queriedAt: balance === null ? previous?.queriedAt ?? now : now,
         lastAttemptAt: now,
         ...(error === undefined || error.length === 0 ? {} : { lastError: error }),
+        ...(detail === undefined && genericDetail !== undefined ? { detail: genericDetail } : {}),
         ...(detail === undefined || typeof detail !== 'object' ? {} : { detail }),
       },
     },

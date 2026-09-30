@@ -82,7 +82,22 @@ function expirationDetail(account: ProviderAccount): string {
 interface BalanceSummary {
   total: number
   queriedAt: number
+  expiredTotal?: number
+  packages?: Array<Record<string, unknown>>
   detail?: PhanthyWalletDetail
+}
+
+interface GenericCreditPackage {
+  name?: unknown
+  label?: unknown
+  remaining?: unknown
+  total?: unknown
+  used?: unknown
+  active?: unknown
+  expiredTime?: unknown
+  cycleEndTime?: unknown
+  expiresAt?: unknown
+  estimate?: unknown
 }
 
 interface PhanthyWalletPool {
@@ -124,8 +139,12 @@ function asString(value: unknown): string | undefined {
 }
 
 function parsePhanthyDetail(value: unknown): PhanthyWalletDetail | undefined {
-  if (typeof value !== 'object' || value === null) return undefined
-  return value as PhanthyWalletDetail
+  const candidate = value as Partial<PhanthyWalletDetail> | null
+  if (typeof value !== 'object' || candidate === null) return undefined
+  if (candidate.wallet === undefined && candidate.daily === undefined && candidate.planName === undefined && candidate.planExpiresAt === undefined) {
+    return undefined
+  }
+  return candidate as PhanthyWalletDetail
 }
 
 function latestBalance(account: ProviderAccount): BalanceSummary | undefined {
@@ -138,8 +157,18 @@ function latestBalance(account: ProviderAccount): BalanceSummary | undefined {
       const total = typeof record.total === 'number' ? record.total : Number(record.amount)
       const queriedAt = typeof record.queriedAt === 'number' ? record.queriedAt : 0
       const detail = parsePhanthyDetail(record.detail)
+      const packages = Array.isArray(record.packages)
+        ? record.packages.filter((entry): entry is Record<string, unknown> => typeof entry === 'object' && entry !== null)
+        : []
+      const expiredTotal = asFiniteNumber(record.expiredTotal)
       if (!Number.isFinite(total) || record.lastError !== undefined) return []
-      return [{ total, queriedAt, ...(detail === undefined ? {} : { detail }) }]
+      return [{
+        total,
+        queriedAt,
+        ...(expiredTotal === undefined ? {} : { expiredTotal }),
+        ...(packages.length === 0 ? {} : { packages }),
+        ...(detail === undefined ? {} : { detail }),
+      }]
     })
     .sort((left, right) => right.queriedAt - left.queriedAt)
   return values[0]
@@ -162,6 +191,88 @@ function phanthyRewardLine(detail: PhanthyWalletDetail | undefined): string | un
   if (streakDays !== undefined) parts.push(`连续 ${formatNumber(streakDays)} 天`)
   if (totalGranted !== undefined) parts.push(`累计 ${formatNumber(totalGranted)}`)
   return parts.join(' · ')
+}
+
+function genericPackageLabel(entry: GenericCreditPackage): string {
+  return asString(entry.name) ?? asString(entry.label) ?? '额度池'
+}
+
+function genericPackageDate(entry: GenericCreditPackage): string | undefined {
+  const raw = asString(entry.expiresAt) ?? asString(entry.expiredTime) ?? asString(entry.cycleEndTime)
+  if (raw === undefined) return undefined
+  const normalized = raw.includes('T') ? raw : raw.replace(' ', 'T')
+  const parsed = Date.parse(normalized)
+  return Number.isFinite(parsed) ? new Date(parsed).toLocaleDateString() : raw
+}
+
+function CreditPackageDetails({ packages, expiredTotal }: { packages?: Array<Record<string, unknown>>; expiredTotal?: number }) {
+  if (packages === undefined || packages.length === 0) return null
+  // CodeBuddy 会把每日任务产生的几十个小额裂变包都单独返回；直接铺开反而
+  // 掩盖主要额度，所以同名小额包先聚合，再保留原始明细用于精确剩余。
+  const keyed = new Map<string, { name: string; remaining: number; total: number; used: number; active: boolean; nearestExpiry?: string; entries: GenericCreditPackage[] }>()
+  for (const raw of packages) {
+    const entry = raw as GenericCreditPackage
+    const name = genericPackageLabel(entry)
+    const active = entry.active !== false
+    const remaining = asFiniteNumber(entry.remaining) ?? 0
+    const total = asFiniteNumber(entry.total) ?? 0
+    const used = asFiniteNumber(entry.used) ?? 0
+    const expiry = genericPackageDate(entry)
+    const aggregate = keyed.get(name)
+    if (aggregate === undefined) {
+      keyed.set(name, { name, remaining, total, used, active, nearestExpiry: expiry, entries: [entry] })
+      continue
+    }
+    aggregate.remaining += remaining
+    aggregate.total += total
+    aggregate.used += used
+    aggregate.active = aggregate.active && active
+    if (expiry !== undefined && (aggregate.nearestExpiry === undefined || Date.parse(expiry.replace(' ', 'T')) < Date.parse(aggregate.nearestExpiry.replace(' ', 'T')))) {
+      aggregate.nearestExpiry = expiry
+    }
+    aggregate.entries.push(entry)
+  }
+  const rows = [...keyed.values()].sort((left, right) => right.remaining - left.remaining)
+  return (
+    <div className="phanthy-credit-details">
+      {rows.map((row, index) => {
+        const label = row.name
+        const remaining = row.remaining
+        const total = row.total
+        const used = row.used
+        const active = row.active
+        const expiry = row.nearestExpiry
+        const percent = remaining !== undefined && total !== undefined && total > 0
+          ? Math.max(0, Math.min(100, Math.round((remaining / total) * 100)))
+          : undefined
+        const subParts = [
+          used === undefined ? null : `已用 ${formatNumber(used)}`,
+          expiry === undefined ? null : `${expiry} 到期`,
+          active ? null : '已失效',
+          row.entries.length > 1 ? `${row.entries.length} 个包` : null,
+          (row.entries[0] as GenericCreditPackage | undefined)?.estimate === true ? '估算' : null,
+        ].filter((item): item is string => item !== null)
+        return (
+          <div key={`${label}-${index}`} className={active ? 'phanthy-pool' : 'phanthy-pool is-expired'}>
+            <div className="phanthy-pool-top">
+              <span>{label}</span>
+              <strong>{formatNumber(remaining ?? 0)}{total === undefined ? '' : ` / ${formatNumber(total)}`}</strong>
+            </div>
+            {percent === undefined ? null : (
+              <div className="phanthy-pool-bar" aria-hidden="true"><span style={{ width: `${percent}%` }} /></div>
+            )}
+            {subParts.length === 0 ? null : <div className="phanthy-pool-sub">{subParts.join(' · ')}</div>}
+          </div>
+        )
+      })}
+      {packages.length > 0 && packages.every((raw) => asFiniteNumber((raw as GenericCreditPackage).total) === undefined) ? (
+        <div className="phanthy-pool-sub">总量上游未提供，仅展示剩余</div>
+      ) : null}
+      {expiredTotal === undefined || expiredTotal <= 0 ? null : (
+        <div className="phanthy-pool-sub">另有 {formatNumber(expiredTotal)} 已失效</div>
+      )}
+    </div>
+  )
 }
 
 function PhanthyCreditDetails({ detail }: { detail: PhanthyWalletDetail | undefined }) {
@@ -211,9 +322,14 @@ function PhanthyCreditDetails({ detail }: { detail: PhanthyWalletDetail | undefi
       })}
       {pending === undefined || pending <= 0 ? null : <div className="phanthy-pool-sub">待发放 {formatNumber(pending)}</div>}
       {planExpiresAt === undefined ? null : <div className="phanthy-pool-sub">{planName ?? '套餐'} 到期 {planExpiresAt}</div>}
-      {rewardPools.length === 0 && rewardLine !== undefined ? null : null}
     </div>
   )
+}
+
+function CreditDetails({ balance }: { balance: BalanceSummary | undefined }) {
+  if (balance === undefined) return null
+  if (balance.detail?.wallet !== undefined) return <PhanthyCreditDetails detail={balance.detail} />
+  return <CreditPackageDetails packages={balance.packages} expiredTotal={balance.expiredTotal} />
 }
 
 function cooldownRemainingText(account: ProviderAccount): string | undefined {
@@ -817,11 +933,11 @@ export function AccountsPage() {
                         {(account.reserveCredits ?? 0) > 0 ? <Badge tone="warning">保留 {account.reserveCredits}</Badge> : null}
                       </div>
                     </div>
-                    {balance?.detail === undefined ? null : (
+                    {balance === undefined || (balance.detail === undefined && (balance.packages === undefined || balance.packages.length === 0)) ? null : (
                       <div className="account-detail-row account-detail-row-wide">
                         <span className="account-detail-label">明细</span>
                         <div className="account-detail-value">
-                          <PhanthyCreditDetails detail={balance.detail} />
+                          <CreditDetails balance={balance} />
                         </div>
                       </div>
                     )}
