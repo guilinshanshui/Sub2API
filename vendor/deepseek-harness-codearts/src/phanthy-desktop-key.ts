@@ -70,7 +70,8 @@ export async function loadOrCreatePhanthyDesktopIdentity(
   uid: string,
   dataDir: string,
 ): Promise<PhanthyDesktopIdentity> {
-  const path = join(dataDir, PHANTHY_DESKTOP_INSTALLATION_DIR, `${sanitizeUid(uid)}.json`)
+  const effectiveUid = uid.trim().length > 0 ? uid.trim() : 'default'
+  const path = join(dataDir, PHANTHY_DESKTOP_INSTALLATION_DIR, `${sanitizeUid(effectiveUid)}.json`)
   let keyFile: PhanthyDesktopKeyFile | undefined
   try {
     const parsed: unknown = JSON.parse(await readFile(path, 'utf8'))
@@ -110,7 +111,7 @@ export function phanthyPublicKeyB64url(privateKey: KeyObject): string {
 /**
  * 构造签名基串。
  *
- * `v1\nMETHOD\nPATH\nTIMESTAMP\nNONCE\nSHA256_BODY_B64URL\nIDEMPOTENCY_KEY\n`
+ * `v1\nMETHOD\nPATH\nTIMESTAMP\nNONCE\nSHA256_BODY_B64URL\nIDEMPOTENCY_KEY`
  */
 export function phanthySignatureBase(params: {
   method: string
@@ -131,7 +132,6 @@ export function phanthySignatureBase(params: {
     params.nonce,
     b64url(bodyHash),
     params.idempotencyKey ?? '',
-    '',
   ].join('\n')
 }
 

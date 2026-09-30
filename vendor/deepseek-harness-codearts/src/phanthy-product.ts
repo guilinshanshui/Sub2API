@@ -46,7 +46,7 @@ export const PHANTHY: PhanthyProduct = {
   displayName: 'PhanthyCode',
   apiBase: PHANTHY_API_BASE,
   desktopVersion: '2.33.2',
-  desktopPlatform: 'win32',
+  desktopPlatform: process.platform === 'win32' ? 'windows' : process.platform,
   defaultCredentialRef: 'PHANTHY_ACCESS_TOKEN',
   fallbackModels: PHANTHY_FALLBACK_MODELS,
 }

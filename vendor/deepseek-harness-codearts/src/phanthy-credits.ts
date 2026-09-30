@@ -34,6 +34,20 @@ export interface PhanthyActivitiesSummary {
   feature_flags?: { daily_enabled?: boolean }
 }
 
+/** 从 JWT access token 解出服务端账号 uid（sub 字段）。 */
+export function uidFromAccessToken(accessToken: string): string {
+  const parts = accessToken.split('.')
+  if (parts.length < 2) return ''
+  try {
+    const payload = JSON.parse(
+      Buffer.from(parts[1].replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'),
+    ) as Record<string, unknown>
+    return typeof payload.sub === 'string' ? payload.sub : ''
+  } catch {
+    return ''
+  }
+}
+
 /** claim 响应。 */
 export interface PhanthyDailyClaimResponse {
   status: string
@@ -63,11 +77,23 @@ export async function fetchPhanthyActivitiesSummary(
   fetcher: typeof fetch,
   dataDir: string = join(process.cwd(), 'data'),
 ): Promise<PhanthyActivitiesSummary | null> {
+  const result = await fetchPhanthyActivitiesSummaryDetailed(product, credential, fetcher, dataDir)
+  return result.summary
+}
+
+/** 读取 activities summary，失败时返回具体原因。 */
+export async function fetchPhanthyActivitiesSummaryDetailed(
+  product: PhanthyProduct,
+  credential: PhanthyCredential,
+  fetcher: typeof fetch,
+  dataDir: string = join(process.cwd(), 'data'),
+): Promise<{ summary: PhanthyActivitiesSummary | null; error?: string }> {
   try {
-    if (credential.uid.trim().length === 0) return null
-    const identity = await loadOrCreatePhanthyDesktopIdentity(credential.uid, dataDir)
+    const uid = credential.uid.trim().length > 0 ? credential.uid : uidFromAccessToken(credential.access_token)
+    if (uid.length === 0) return { summary: null, error: '凭据缺少 uid 且无法从 access_token 解析' }
+    const identity = await loadOrCreatePhanthyDesktopIdentity(uid, dataDir)
     const registered = await ensurePhanthyDesktopInstallation(product, credential, identity, fetcher)
-    if (!registered.ok) return null
+    if (!registered.ok) return { summary: null, error: registered.message }
     const timestampMs = Date.now()
     const nonce = randomNonce()
     const path = '/api/oauth/activities/summary'
@@ -91,9 +117,11 @@ export async function fetchPhanthyActivitiesSummary(
       signal: AbortSignal.timeout(20_000),
     })
     const result = await readPhanthyJson<PhanthyActivitiesSummary>(response)
-    return result.ok ? result.body : null
-  } catch {
-    return null
+    return result.ok
+      ? { summary: result.body }
+      : { summary: null, error: `查询失败（HTTP ${result.status}）：${result.text.slice(0, 120)}` }
+  } catch (error) {
+    return { summary: null, error: error instanceof Error ? error.message : String(error) }
   }
 }
 
@@ -117,6 +145,19 @@ export async function fetchPhanthyCreditBalance(
   return summary === null ? null : parsePhanthyCreditBalance(summary)
 }
 
+/** summary → CreditBalance，失败时带具体原因。 */
+export async function fetchPhanthyCreditBalanceDetailed(
+  product: PhanthyProduct,
+  credential: PhanthyCredential,
+  fetcher: typeof fetch,
+  dataDir: string = join(process.cwd(), 'data'),
+): Promise<{ balance: CreditBalance | null; error?: string }> {
+  const result = await fetchPhanthyActivitiesSummaryDetailed(product, credential, fetcher, dataDir)
+  return result.summary === null
+    ? { balance: null, error: result.error }
+    : { balance: parsePhanthyCreditBalance(result.summary) }
+}
+
 /**
  * 领取每日登录奖励。
  *
@@ -129,13 +170,14 @@ export async function claimPhanthyDailyLogin(
   dataDir: string,
   fetcher: typeof fetch = fetch,
 ): Promise<ClaimOutcome> {
-  if (credential.uid.trim().length === 0) {
+  const uid = credential.uid.trim().length > 0 ? credential.uid : uidFromAccessToken(credential.access_token)
+  if (uid.length === 0) {
     return { kind: 'failed', code: -1, message: '凭据缺少 uid，无法领取每日奖励' }
   }
 
   let identity: PhanthyDesktopIdentity
   try {
-    identity = await loadOrCreatePhanthyDesktopIdentity(credential.uid, dataDir)
+    identity = await loadOrCreatePhanthyDesktopIdentity(uid, dataDir)
   } catch (error) {
     return { kind: 'failed', code: -1, message: `桌面端身份创建失败：${error instanceof Error ? error.message : String(error)}` }
   }

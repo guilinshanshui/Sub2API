@@ -27,7 +27,12 @@ import {
   type PhanthyPkceState,
 } from './phanthy.js'
 import { PHANTHY, type PhanthyProduct } from './phanthy-product.js'
-import { fetchPhanthyCreditBalance, claimPhanthyDailyLogin } from './phanthy-credits.js'
+import {
+  fetchPhanthyCreditBalance,
+  fetchPhanthyCreditBalanceDetailed,
+  uidFromAccessToken,
+  claimPhanthyDailyLogin,
+} from './phanthy-credits.js'
 import { readPhanthyJson } from './phanthy-runtime.js'
 import { syncAccountExpiry, type ExpiryAccessors } from './expiry-sync.js'
 import type { AccountPool } from './account-pool.js'
@@ -221,12 +226,49 @@ export class PhanthyAuth extends Service {
 
   /** 查询积分余额。 */
   async fetchCreditBalance(credential: PhanthyCredential): Promise<CreditBalance | null> {
-    return fetchPhanthyCreditBalance(this.product, credential, this.fetcher, this.dataDir)
+    const result = await this.fetchCreditBalanceDetailed(credential)
+    return result.balance
+  }
+
+  /**
+   * 查询积分余额；近到期或 401 后自动续期一次并重试。
+   *
+   * access token 只有约 30 分钟寿命，参考实现同样是 summary 401 后刷新重试。
+   */
+  async fetchCreditBalanceDetailed(credential: PhanthyCredential): Promise<{
+    balance: CreditBalance | null
+    error?: string
+  }> {
+    const first = await fetchPhanthyCreditBalanceDetailed(this.product, credential, this.fetcher, this.dataDir)
+    if (first.balance !== null) return first
+    if (!isPhanthyRefreshable(credential)) return first
+    if (!this.isAccessTokenStale(credential) && !this.isCredentialRejected(first.error)) return first
+    try {
+      const refreshed = await this.refreshCredentialValue(credential)
+      await this.persistRefreshedCredential(refreshed)
+      return await fetchPhanthyCreditBalanceDetailed(this.product, refreshed, this.fetcher, this.dataDir)
+    } catch (error) {
+      return { balance: null, error: error instanceof Error ? error.message : String(error) }
+    }
   }
 
   /** 领取每日登录奖励。 */
   async claimDailyLogin(credential: PhanthyCredential): Promise<ClaimOutcome> {
     return claimPhanthyDailyLogin(this.product, credential, this.dataDir, this.fetcher)
+  }
+
+  /** 领取每日登录奖励；凭据被拒绝或近到期时自动续期一次并重试。 */
+  async claimDailyLoginDetailed(credential: PhanthyCredential): Promise<ClaimOutcome> {
+    const first = await claimPhanthyDailyLogin(this.product, credential, this.dataDir, this.fetcher)
+    if (first.kind !== 'failed' || !isPhanthyRefreshable(credential)) return first
+    if (!this.isAccessTokenStale(credential) && !this.isCredentialRejected(first.message)) return first
+    try {
+      const refreshed = await this.refreshCredentialValue(credential)
+      await this.persistRefreshedCredential(refreshed)
+      return await claimPhanthyDailyLogin(this.product, refreshed, this.dataDir, this.fetcher)
+    } catch (error) {
+      return { kind: 'failed', code: -1, message: error instanceof Error ? error.message : String(error) }
+    }
   }
 
   /** 用 refresh_token 换新令牌（不触碰存储）。 */
@@ -239,6 +281,28 @@ export class PhanthyAuth extends Service {
     const token = await this.requestToken(body)
     const next = this.credentialFromToken(token)
     return { ...next, uid: credential.uid, ...(credential.nickname ? { nickname: credential.nickname } : {}) }
+  }
+
+  private async refreshCredentialValue(credential: PhanthyCredential): Promise<PhanthyCredential> {
+    const next = await this.refreshCredential(credential)
+    const uid = credential.uid.trim().length > 0
+      ? credential.uid
+      : uidFromAccessToken(next.access_token)
+    return uid.length > 0 ? { ...next, uid } : next
+  }
+
+  private async persistRefreshedCredential(credential: PhanthyCredential): Promise<void> {
+    await this.ctx.credentials.set(credentialRef(this.credentialRefName), JSON.stringify(credential))
+    this.lastRefreshError = undefined
+  }
+
+  private isAccessTokenStale(credential: PhanthyCredential): boolean {
+    const expiresAt = phanthyCredentialExpiresAtMs(credential)
+    return expiresAt === undefined || expiresAt - Date.now() <= 60 * 60 * 1000
+  }
+
+  private isCredentialRejected(error?: string): boolean {
+    return error !== undefined && /凭据已失效|HTTP 401|HTTP 403/.test(error)
   }
 
   /** POST /oauth/token。 */

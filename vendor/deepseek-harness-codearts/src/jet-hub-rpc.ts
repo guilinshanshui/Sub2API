@@ -32,8 +32,6 @@ import type { StartedRaccoonLoginFlow } from './raccoon-login-page.js'
 import { PHANTHY } from './phanthy-product.js'
 import type { PhanthyAuth } from './phanthy-auth.js'
 import {
-  claimPhanthyDailyLogin,
-  fetchPhanthyCreditBalance,
   fetchPhanthyActivitiesSummary,
 } from './phanthy-credits.js'
 import { phanthyCredentialExpiresAtMs } from './phanthy.js'
@@ -933,7 +931,7 @@ function registerJetHubEndpoints(
     if (provider === PHANTHY.id) {
       const value = await collectClaimResults<PhanthyCredential, undefined>(accounts, undefined, {
         resolve: (ref) => ctx.credentials.resolve(ref),
-        claim: (credential) => claimPhanthyDailyLogin(PHANTHY, credential, process.cwd() + '/data'),
+        claim: (credential) => phanthy.claimDailyLoginDetailed(credential),
         precheckStatus: false,
         warn: (msg) => ctx.logger?.warn?.(msg),
       })
@@ -2186,7 +2184,7 @@ function registerJetHubEndpoints(
           // 余额来自 `GET /api/oauth/activities/summary`（只读）。
           const values = await collectCreditBalances<PhanthyCredential, undefined>(accounts, undefined, {
             resolve: (ref) => ctx.credentials.resolve(ref),
-            fetchBalance: (credential) => fetchPhanthyCreditBalance(PHANTHY, credential, fetch, process.cwd() + '/data'),
+            fetchBalanceDetailed: (credential) => phanthy.fetchCreditBalanceDetailed(credential),
             persistBalance: (account, balance, error) => persistCreditBalance(pool, account, balance, error),
             warn: (msg) => ctx.logger?.warn?.(msg),
           })
