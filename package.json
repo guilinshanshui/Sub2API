@@ -1,0 +1,16 @@
+{
+  "name": "sub2api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.19.0",
+  "scripts": {
+    "build": "corepack pnpm -r --if-present build",
+    "typecheck": "corepack pnpm -r --if-present typecheck",
+    "test": "corepack pnpm -r --if-present test",
+    "dev:gateway": "corepack pnpm --filter @sub2api/gateway dev",
+    "dev:web": "corepack pnpm --filter @sub2api/web dev",
+    "dev": "node scripts/dev.mjs",
+    "start": "node apps/gateway/dist/index.js"
+  }
+}

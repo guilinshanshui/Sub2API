@@ -1,0 +1,16 @@
+.git
+.github
+.research
+.deploy-*
+.runtime-*
+node_modules
+**/node_modules
+**/dist
+**/lib
+data
+*.log
+*.tsbuildinfo
+.env
+coverage
+test-results
+playwright-report

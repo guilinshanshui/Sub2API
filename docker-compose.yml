@@ -1,0 +1,28 @@
+services:
+  sub2api:
+    build:
+      context: .
+    image: sub2api:local
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    environment:
+      SUB2API_HOST: 0.0.0.0
+      SUB2API_PORT: 8787
+      SUB2API_DATA_DIR: /app/data
+      SUB2API_PUBLIC_URL: ${SUB2API_PUBLIC_URL:-http://localhost:8787}
+      SUB2API_WEB_DIST: /app/apps/web/dist
+      SUB2API_ADMIN_PASSWORD: ${SUB2API_ADMIN_PASSWORD:-}
+      SUB2API_API_KEY: ${SUB2API_API_KEY:-}
+      SUB2API_ALLOWED_MODELS: ${SUB2API_ALLOWED_MODELS:-}
+      SUB2API_DEFAULT_PROVIDER: ${SUB2API_DEFAULT_PROVIDER:-}
+      SUB2API_DEFAULT_MODEL: ${SUB2API_DEFAULT_MODEL:-}
+      SUB2API_REQUEST_TIMEOUT_MS: ${SUB2API_REQUEST_TIMEOUT_MS:-300000}
+      SUB2API_SCHEDULER_INTERVAL_MS: ${SUB2API_SCHEDULER_INTERVAL_MS:-1800000}
+      SUB2API_CORS_ORIGINS: ${SUB2API_CORS_ORIGINS:-}
+      SUB2API_LOG_LEVEL: ${SUB2API_LOG_LEVEL:-info}
+    volumes:
+      - sub2api-data:/app/data
+
+volumes:
+  sub2api-data:
