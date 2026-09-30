@@ -4,6 +4,18 @@ Sub2API 将 `deepseek-harness-codearts` 的账号池和上游模型适配能力�
 对外提供 OpenAI 兼容 API，并附带中文 Web 管理台。管理台的导航、账号池操作和常用
 运维视图参考了 `workbuddy2api-hub`。
 
+## 一键启动
+
+双击项目根目录下的 `Start.bat` 即可。脚本会自动完成以下操作：
+
+1. 检查 Node.js 是否已安装
+2. 首次运行时自动安装依赖（`pnpm install`）
+3. 首次运行时自动构建（`pnpm build`）
+4. 启动网关并自动打开浏览器访问管理台
+5. 关闭命令行窗口即可停止服务
+
+首次打开管理台时会要求设置管理员密码（至少 8 位），之后用密码登录即可。
+
 ## 功能
 
 - OpenAI 兼容接口：`/v1/models`、`/v1/chat/completions`、`/v1/responses`
