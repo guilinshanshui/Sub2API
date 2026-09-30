@@ -25,6 +25,12 @@ interface AccountListResult {
   accounts: Array<Record<string, unknown>>
 }
 
+interface CreditBalanceResultAccount {
+  accountId: string
+  balance?: unknown
+  error?: string
+}
+
 interface ModelListResult {
   models: Array<{ id: string; name: string; disabled: boolean }>
 }
@@ -69,6 +75,12 @@ interface AutomationStatusResult {
     message?: string
     details?: Record<string, unknown>
   }>
+}
+
+interface CreditBalanceResultAccount {
+  accountId: string
+  balance?: unknown
+  error?: string
 }
 
 const providerSchema = z.object({
@@ -208,6 +220,8 @@ export function registerAdminRoutes(app: FastifyInstance, options: AdminRouteOpt
   let schedulerRunning = false
   let lastSchedulerRunAt: number | undefined
   let lastManualSchedulerRunAt: number | undefined
+  let lastBalanceRefreshAt: number | undefined
+  let lastBalanceRefreshAttemptAt: number | undefined
 
   const runScheduler = async (manual: boolean): Promise<{ refreshed: number; failed: number; completedAt: number }> => {
     schedulerRunning = true
@@ -240,6 +254,56 @@ export function registerAdminRoutes(app: FastifyInstance, options: AdminRouteOpt
         app.log.warn({ err: error }, 'Scheduled account refresh failed')
       })
     }, options.config.schedulerIntervalMs)
+    timer.unref()
+    app.addHook('onClose', async () => {
+      clearInterval(timer)
+    })
+  }
+
+  let balanceRefreshing = false
+  const refreshAllBalances = async (manual: boolean): Promise<{ accounts: number; failed: number; completedAt: number }> => {
+    if (balanceRefreshing) return { accounts: 0, failed: 0, completedAt: Date.now() }
+    balanceRefreshing = true
+    try {
+      const providers = runtime.llm.listProviders()
+      let accounts = 0
+      let failed = 0
+      for (const provider of providers) {
+        const result = await jetHub.call<AccountListResult>('account.list', { provider: provider.id })
+        const enabledAccounts = result.accounts.filter((account) => account.enabled === true)
+        accounts += enabledAccounts.length
+        for (const account of enabledAccounts) {
+          const accountId = typeof account.id === 'string' ? account.id : ''
+          if (accountId.length === 0) continue
+          try {
+            const refreshed = await jetHub.call<{ accounts?: CreditBalanceResultAccount[] }>('credits.balances', {
+              provider: provider.id,
+              accountId,
+            })
+            failed += (refreshed.accounts ?? []).filter((item) => item.error !== undefined).length
+          } catch (error) {
+            app.log.warn({ err: error, provider: provider.id, accountId }, 'Scheduled balance refresh failed')
+            failed += 1
+          }
+        }
+      }
+      const completedAt = Date.now()
+      lastBalanceRefreshAt = completedAt
+      return { accounts, failed, completedAt }
+    } finally {
+      lastBalanceRefreshAttemptAt = Date.now()
+      balanceRefreshing = false
+    }
+  }
+
+  if (options.config.schedulerIntervalMs > 0 && options.config.balanceRefreshMinutes > 0) {
+    const intervalMs = Math.max(options.config.schedulerIntervalMs, options.config.balanceRefreshMinutes * 60_000)
+    const timer = setInterval(() => {
+      if (balanceRefreshing) return
+      void refreshAllBalances(false).catch((error: unknown) => {
+        app.log.warn({ err: error }, 'Scheduled balance refresh failed')
+      })
+    }, intervalMs)
     timer.unref()
     app.addHook('onClose', async () => {
       clearInterval(timer)
@@ -721,6 +785,9 @@ export function registerAdminRoutes(app: FastifyInstance, options: AdminRouteOpt
       intervalMs: options.config.schedulerIntervalMs,
       lastRunAt: lastSchedulerRunAt,
       lastManualRunAt: lastManualSchedulerRunAt,
+      lastBalanceRefreshAt,
+      lastBalanceRefreshAttemptAt,
+      balanceRefreshMinutes: options.config.balanceRefreshMinutes,
       startedAt: options.startedAt,
     },
   }))
@@ -728,7 +795,17 @@ export function registerAdminRoutes(app: FastifyInstance, options: AdminRouteOpt
   app.post('/api/scheduler/run', adminOnly, async (_request, reply) => {
     if (schedulerRunning) return sendAdminError(reply, 409, 'scheduler_busy', '巡检任务正在执行。')
     try {
-      return { data: await runScheduler(true) }
+      const tokenResult = await runScheduler(true)
+      const balanceResult = options.config.balanceRefreshMinutes > 0
+        ? await refreshAllBalances(true)
+        : { accounts: 0, failed: 0, completedAt: Date.now() }
+      return {
+        data: {
+          ...tokenResult,
+          balanceAccounts: balanceResult.accounts,
+          balanceFailures: balanceResult.failed,
+        },
+      }
     } catch (error) {
       return sendAdminError(reply, 502, 'scheduler_run_failed', errorMessage(error))
     }

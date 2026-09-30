@@ -150,7 +150,10 @@ export function SettingsPage() {
     setRunning(true)
     try {
       const result = await apiPost<SchedulerRunResult>('/api/scheduler/run')
-      notify(`巡检完成：刷新 ${result.refreshed} 个账号，失败 ${result.failed} 个。`, result.failed > 0 ? 'info' : 'success')
+      const balanceText = result.balanceAccounts === undefined
+        ? ''
+        : `，余额 ${result.balanceAccounts} 个，失败 ${result.balanceFailures ?? 0} 个`
+      notify(`巡检完成：刷新 ${result.refreshed} 个账号，失败 ${result.failed} 个${balanceText}。`, result.failed > 0 ? 'info' : 'success')
       setScheduler(await apiGet<SchedulerStatus>('/api/scheduler'))
     } catch (reason) {
       notify(errorText(reason), 'error')
@@ -301,7 +304,12 @@ export function SettingsPage() {
                   <span>检查间隔</span>
                   <strong>{scheduler === undefined ? '-' : scheduler.intervalMs === 0 ? '已禁用' : `${Math.round(scheduler.intervalMs / 60_000)} 分钟`}</strong>
                 </div>
+                <div>
+                  <span>余额自动刷新</span>
+                  <strong>{scheduler?.balanceRefreshMinutes === undefined || scheduler.balanceRefreshMinutes === 0 ? '已禁用' : `${scheduler.balanceRefreshMinutes} 分钟`}</strong>
+                </div>
                 <div><span>上次完成</span><strong>{formatDate(scheduler?.lastRunAt)}</strong></div>
+                <div><span>上次余额刷新</span><strong>{formatDate(scheduler?.lastBalanceRefreshAt)}</strong></div>
               </div>
               <div className="panel-inline-action">
                 <button className="btn btn-secondary" type="button" onClick={() => void runScheduler()} disabled={running || scheduler?.running === true}>

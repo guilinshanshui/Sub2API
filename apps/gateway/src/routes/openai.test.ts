@@ -33,6 +33,7 @@ async function createFixture(): Promise<Fixture> {
     defaultModel: '',
     requestTimeoutMs: 30_000,
     schedulerIntervalMs: 0,
+    balanceRefreshMinutes: 0,
     corsOrigins: [],
     logLevel: 'silent',
   }

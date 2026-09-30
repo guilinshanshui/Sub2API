@@ -318,12 +318,16 @@ export interface SchedulerStatus {
   intervalMs: number
   lastRunAt?: number
   lastManualRunAt?: number
+  balanceRefreshMinutes?: number
+  lastBalanceRefreshAt?: number
   startedAt: number
 }
 
 export interface SchedulerRunResult {
   refreshed: number
   failed: number
+  balanceAccounts?: number
+  balanceFailures?: number
   completedAt: number
 }
 

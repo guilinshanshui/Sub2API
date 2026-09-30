@@ -397,6 +397,11 @@ export function AccountsPage() {
   }, [])
 
   useEffect(() => {
+    const timer = window.setInterval(() => void load(true), 15_000)
+    return () => window.clearInterval(timer)
+  }, [])
+
+  useEffect(() => {
     // 兼容旧版返回：未显式给 loginMode 的 URL 登录一律按 url 轮询。
     if (login === undefined || (login.loginMode !== undefined && login.loginMode !== 'url')) return
     let active = true

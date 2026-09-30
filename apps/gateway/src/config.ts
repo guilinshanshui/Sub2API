@@ -12,6 +12,7 @@ export interface GatewayConfig {
   defaultModel: string
   requestTimeoutMs: number
   schedulerIntervalMs: number
+  balanceRefreshMinutes: number
   corsOrigins: string[]
   logLevel: string
 }
@@ -49,6 +50,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): GatewayConfig 
     defaultModel: env.SUB2API_DEFAULT_MODEL?.trim() || '',
     requestTimeoutMs: integer(env.SUB2API_REQUEST_TIMEOUT_MS, 300_000),
     schedulerIntervalMs: nonNegativeInteger(env.SUB2API_SCHEDULER_INTERVAL_MS, 30 * 60_000),
+    balanceRefreshMinutes: nonNegativeInteger(env.SUB2API_BALANCE_REFRESH_MINUTES, 60),
     corsOrigins: csv(env.SUB2API_CORS_ORIGINS),
     logLevel: env.SUB2API_LOG_LEVEL?.trim() || 'info',
   }
