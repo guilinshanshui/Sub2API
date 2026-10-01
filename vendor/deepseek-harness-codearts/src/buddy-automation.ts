@@ -65,8 +65,12 @@ const DAILY_SIGNIN_SKIP_REASONS: Readonly<Record<string, string>> = {
 }
 
 const HTTP_TIMEOUT_MS = 30_000
+const WEB_TURN_TIMEOUT_MS = 120_000
+const WEB_TURN_POLL_INTERVAL_MS = 3_000
+const WORKBUDDY_WEB_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 Edg/140.0.0.0'
 const DESKTOP_BASE = 'https://copilot.tencent.com'
 const BILLING_BASE = 'https://www.codebuddy.cn'
+const WORKBUDDY_WEB_BASE = 'https://www.workbuddy.ai'
 const WEB_BASE = 'https://www.workbuddy.cn'
 const SCHOOL_BASE = `${BILLING_BASE}/portal/activity/school`
 const SCHOOL_OPEN_DAY_ACTIVITY_ID = 'school_open_day_2026'
@@ -556,7 +560,21 @@ async function runIntlDaily(deps: AutomationDeps, jobId: string, account: Automa
   if (account.provider !== 'workbuddy') return makeRun(jobId, account.id, 'skipped', startedAt, '不是国际版账号')
   const conversation = randomId('wb2api-intl')
   await reportDesktop(deps, account, [desktopChatSequence(conversation)])
-  return makeRun(jobId, account.id, 'success', startedAt, '国际版活跃对话已上报')
+  const details: Record<string, unknown> = { desktopActivity: true }
+  try {
+    const web = await runWorkbuddyWebDaily(deps, account)
+    details.webConversation = web
+    const chunks = asNumberValue(web.chunks) ?? 0
+    const status = asText(web.status)
+    if (web.ok === true && status === 'completed') {
+      return makeRun(jobId, account.id, 'success', startedAt, `网页通道活跃会话已完成，输出 ${chunks} 段`, details)
+    }
+    return makeRun(jobId, account.id, 'unverified', startedAt, `网页通道未完成：${asText(web.error) || status || '状态未知'}`, details)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    details.webConversation = { ok: false, error: message }
+    return makeRun(jobId, account.id, 'unverified', startedAt, `网页通道执行失败：${message}`, details)
+  }
 }
 
 async function runNightOwl(deps: AutomationDeps, jobId: string, account: AutomationAccount, startedAt: number): Promise<AutomationRunRecord> {
@@ -638,6 +656,209 @@ function desktopChatSequence(conversationId: string, modelId = 'fast-model', mod
       messageErrorCode: '', finishReason: 'stop', conversationId,
     },
   ]
+}
+
+/** 国际版每日活跃要走网页 agent 会话；只创建会话不接沙箱不会被计为有效对话。 */
+async function runWorkbuddyWebDaily(deps: AutomationDeps, account: AutomationAccount): Promise<Record<string, unknown>> {
+  const webHeaders = {
+    Authorization: `Bearer ${asToken(account.credential.access_token)}`,
+    'X-User-Id': asText(account.credential.user_id),
+    Accept: 'application/json, text/plain, */*',
+    'Content-Type': 'application/json',
+    Origin: WORKBUDDY_WEB_BASE,
+    Referer: `${WORKBUDDY_WEB_BASE}/app`,
+    'User-Agent': WORKBUDDY_WEB_USER_AGENT,
+  }
+  const fetcher = deps.fetcher ?? fetch
+  const webJson = async (url: string, method: 'GET' | 'POST', body?: unknown): Promise<Record<string, unknown>> => {
+    const response = await fetcher(url, {
+      method,
+      headers: webHeaders,
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
+    })
+    const text = await response.text()
+    if (!response.ok) throw new Error(`HTTP ${response.status}: ${text.slice(0, 160)}`)
+    let parsed: unknown
+    try {
+      parsed = text.length > 0 ? JSON.parse(text) : {}
+    } catch {
+      throw new Error(`非 JSON 响应（HTTP ${response.status}）`)
+    }
+    if (typeof parsed !== 'object' || parsed === null) throw new Error('响应格式无效')
+    const record = parsed as Record<string, unknown>
+    if (record.code !== 0 && record.code !== undefined && record.code !== null) {
+      throw new Error(`${asText(record.msg) || asText(record.message) || asText(record.code)}`)
+    }
+    return record
+  }
+
+  const conversationBody = await webJson(`${WORKBUDDY_WEB_BASE}/console/as/conversations/`, 'POST', {
+    conversationOrigin: 'workbuddy-app',
+    model: 'deepseek-v4.1-flash',
+    plugins: [{ name: 'weixinpay', marketplace: 'codebuddy-builtin' }],
+    prompt: 'Hi',
+  })
+  const conversation = asText(expectOk(conversationBody, '创建网页会话').id)
+  if (conversation.length === 0) throw new Error('创建网页会话成功但未返回 id')
+
+  const encodedConversation = encodeURIComponent(conversation)
+  const sessionBody = await webJson(
+    `${WORKBUDDY_WEB_BASE}/console/as/conversations/${encodedConversation}/session`,
+    'GET',
+  )
+  const session = expectOk(sessionBody, '查询网页会话沙箱')
+  const link = asText(session.link) || asText(session.endpoint)
+  const token = asText(session.token)
+  const sessionId = asText(session.sessionId) || asText(session.session_id) || conversation
+  const cwd = asText(session.cwd) || '/workspace'
+  if (link.length === 0 || token.length === 0) {
+    return { ok: false, conversation, error: '沙箱未就绪（缺少 link 或 token）' }
+  }
+
+  const turn = await driveAcpTurn(
+    deps,
+    link,
+    token,
+    sessionId,
+    cwd,
+    'Hi',
+    webHeaders['User-Agent'],
+    async () => {
+      const body = await webJson(
+        `${WORKBUDDY_WEB_BASE}/console/as/conversations/${encodedConversation}`,
+        'GET',
+      )
+      return asText(expectOk(body, '查询网页会话状态').status)
+    },
+  )
+  return { ...turn, conversation }
+}
+
+interface AcpTurn {
+  ok?: boolean
+  status?: string
+  events?: number
+  chunks?: number
+  elapsedMs?: number
+  error?: string
+}
+
+let acpChunkCount = 0
+
+async function readAcpStream(stream: ReadableStream<Uint8Array>): Promise<void> {
+  const reader = stream.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      let index = buffer.indexOf('\n')
+      while (index >= 0) {
+        const line = buffer.slice(0, index).trim()
+        buffer = buffer.slice(index + 1)
+        if (line.startsWith('data:')) {
+          const payload = line.slice(5).trim()
+          if (payload.length > 0 && payload !== '[DONE]') {
+            try {
+              const message = JSON.parse(payload) as { params?: { update?: { sessionUpdate?: unknown } } }
+              if (message.params?.update?.sessionUpdate === 'agent_message_chunk') acpChunkCount += 1
+            } catch { /* 忽略非 JSON 事件 */ }
+          }
+        }
+        index = buffer.indexOf('\n')
+      }
+    }
+  } finally {
+    reader.releaseLock()
+  }
+}
+
+/**
+ * 网页沙箱采用 streamable HTTP：GET 建立一条 SSE 事件流，POST 发送 JSON-RPC。
+ * 这里不取沙箱里的响应正文，只确保 prompt 这一轮真正驱动到 completed。
+ */
+async function driveAcpTurn(
+  deps: AutomationDeps,
+  linkText: string,
+  token: string,
+  sessionId: string,
+  cwd: string,
+  prompt: string,
+  userAgent: string,
+  readStatus: () => Promise<string>,
+): Promise<AcpTurn> {
+  let link: URL
+  try {
+    link = new URL(linkText)
+  } catch {
+    throw new Error('沙箱地址不可用')
+  }
+  if (link.protocol !== 'http:' && link.protocol !== 'https:') throw new Error('沙箱地址协议不可用')
+
+  const startedAt = Date.now()
+  const fetcher = deps.fetcher ?? fetch
+  acpChunkCount = 0
+  let error = ''
+  let status = ''
+
+  try {
+    const stream = await fetcher(link, {
+      method: 'GET',
+      headers: {
+        Accept: 'text/event-stream',
+        Authorization: `Bearer ${token}`,
+        'User-Agent': userAgent,
+      },
+    })
+    if (!stream.ok) throw new Error(`SSE 通道返回 HTTP ${stream.status}`)
+    const connectionId = stream.headers.get('Acp-Connection-Id') ?? ''
+    if (connectionId.length === 0) throw new Error('SSE 通道没有返回 Acp-Connection-Id')
+    if (stream.body !== null) void readAcpStream(stream.body).catch(() => undefined)
+
+    const request = async (id: number, method: string, params: Record<string, unknown>): Promise<void> => {
+      const response = await fetcher(link, {
+        method: 'POST',
+        headers: {
+          Accept: 'application/json, text/event-stream',
+          Authorization: `Bearer ${token}`,
+          'Acp-Connection-Id': connectionId,
+          'Content-Type': 'application/json',
+          'User-Agent': userAgent,
+        },
+        body: JSON.stringify({ id, jsonrpc: '2.0', method, params }),
+        signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
+      })
+      if (!response.ok) throw new Error(`${method} 返回 HTTP ${response.status}`)
+    }
+
+    await request(1, 'initialize', { clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false }, protocolVersion: 1 })
+    await request(2, 'session/load', { cwd: cwd || '/workspace', mcpServers: [], sessionId })
+    await request(3, 'session/prompt', { prompt: [{ text: prompt, type: 'text' }], sessionId })
+  } catch (caught) {
+    error = caught instanceof Error ? caught.message : String(caught)
+  }
+
+  const deadline = Date.now() + WEB_TURN_TIMEOUT_MS
+  while (Date.now() < deadline) {
+    try {
+      status = await readStatus()
+      if (status === 'completed') return { ok: true, status, chunks: acpChunkCount, elapsedMs: Date.now() - startedAt }
+      if (status === 'failed' || status === 'error') {
+        return { ok: false, status, chunks: acpChunkCount, elapsedMs: Date.now() - startedAt, error: `会话状态=${status}` }
+      }
+    } catch { /* 状态查询暂时失败不终止等待 */ }
+    await sleep(WEB_TURN_POLL_INTERVAL_MS)
+  }
+  return {
+    ok: false,
+    status: status || 'unknown',
+    chunks: acpChunkCount,
+    elapsedMs: Date.now() - startedAt,
+    error: error.length > 0 ? error : `会话在 ${WEB_TURN_TIMEOUT_MS / 1000}s 内没有跑完`,
+  }
 }
 
 function desktopFingerprint(account: AutomationAccount): Record<string, unknown> {

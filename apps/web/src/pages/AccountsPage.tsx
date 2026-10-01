@@ -754,12 +754,14 @@ export function AccountsPage() {
   const runBuddyTasks = async (account: ProviderAccount) => {
     setTasksBusy(true)
     try {
-      const result = await apiPost<{ message?: string; status?: string }>('/api/automation/run', {
+      const result = await apiPost<{ message?: string; status?: string; details?: Record<string, unknown> }>('/api/automation/run', {
         jobId: 'cn_daily',
         provider: account.provider,
         accountId: account.id,
       })
-      notify(result.message || 'CodeBuddy 自动化任务已执行。', 'success')
+      const web = (result.details as { webConversation?: { conversation?: unknown; status?: unknown; chunks?: unknown } } | undefined)?.webConversation
+      const webMessage = web === undefined ? '' : `，网页会话 ${String(web.conversation ?? '-')} 状态 ${String(web.status ?? '-')}，输出 ${String(web.chunks ?? 0)} 段`
+      notify(`${result.message || 'CodeBuddy 自动化任务已执行。'}${webMessage}`, result.status === 'error' ? 'error' : 'success')
       await loadTasks(account, true)
     } catch (reason) {
       notify(errorText(reason), 'error')
