@@ -12,5 +12,8 @@
     "dev:web": "corepack pnpm --filter @sub2api/web dev",
     "dev": "node scripts/dev.mjs",
     "start": "node apps/gateway/dist/index.js"
+  },
+  "devDependencies": {
+    "playwright": "1.49.0"
   }
 }
