@@ -76,6 +76,7 @@ export class PhanthyAuth extends Service {
   readonly product: PhanthyProduct
   readonly credentialRefName: string
   private lastRefreshError: string | undefined
+  private credentialRefreshLocks = new Map<string, Promise<unknown>>()
 
   constructor(ctx: ConstructorParameters<typeof Service>[0], options: {
     product?: PhanthyProduct
@@ -160,26 +161,33 @@ export class PhanthyAuth extends Service {
 
   /**
    * 按账号池 ref 刷新指定账号，并把过期时间同步回账号池。
+   *
+   * PhanthyCode 的 refresh_token 是一次一换；同一凭据的刷新必须串行，
+   * 否则余额/签到接口里的自动续期可能与定时保活同时发起，新 refresh_token
+   * 会被旧响应覆盖，下一轮刷新就变成永久失效。
    */
   async refreshAccountCredential(refName: string, pool?: AccountPool, accountId?: string): Promise<void> {
-    const ref = credentialRef(refName)
-    const resolved = await this.ctx.credentials.resolve(ref)
-    if (!resolved) throw new Error('凭据未配置')
-    const credential = parsePhanthyCredential(resolved.value)
-    if (credential === undefined) throw new Error('凭据解析失败')
-    if (!isPhanthyRefreshable(credential)) {
-      throw new RefreshTokenExpiredError('凭据缺少 refresh_token，请重新登录')
-    }
-    const next = await this.refreshCredential(credential)
-    await this.ctx.credentials.set(ref, JSON.stringify(next))
-    await syncAccountExpiry({
-      pool,
-      provider: this.product.id,
-      credential: next,
-      accessors: PHANTHY_EXPIRY_ACCESSORS,
-      accountId,
-      tag: '[phanthy]',
-      warn: (message) => this.ctx.logger?.warn?.(message),
+    await this.withCredentialRefreshLock(refName, async () => {
+      const ref = credentialRef(refName)
+      const resolved = await this.ctx.credentials.resolve(ref)
+      if (!resolved) throw new Error('凭据未配置')
+      const credential = parsePhanthyCredential(resolved.value)
+      if (credential === undefined) throw new Error('凭据解析失败')
+      if (!isPhanthyRefreshable(credential)) {
+        throw new RefreshTokenExpiredError('凭据缺少 refresh_token，请重新登录')
+      }
+      const next = await this.refreshCredential(credential)
+      await this.ctx.credentials.set(ref, JSON.stringify(next))
+      await syncAccountExpiry({
+        pool,
+        provider: this.product.id,
+        credential: next,
+        accessors: PHANTHY_EXPIRY_ACCESSORS,
+        accountId,
+        tag: '[phanthy]',
+        warn: (message) => this.ctx.logger?.warn?.(message),
+      })
+      this.lastRefreshError = undefined
     })
   }
 
@@ -187,19 +195,22 @@ export class PhanthyAuth extends Service {
   async refreshAll(pool: AccountPool): Promise<void> {
     const accounts = await pool.listAccounts(this.product.id)
     for (const entry of accounts) {
-      if (!entry.refreshable) continue
       const ref = credentialRef(entry.credentialRef)
-      const resolved = await this.ctx.credentials.resolve(ref)
-      if (!resolved) {
-        await pool.updateAccount(entry.id, { refreshable: false }).catch(() => {})
-        continue
-      }
-      const credential = parsePhanthyCredential(resolved.value)
-      if (credential === undefined || !isPhanthyRefreshable(credential)) {
-        await pool.updateAccount(entry.id, { refreshable: false }).catch(() => {})
-        continue
-      }
       try {
+        const resolved = await this.ctx.credentials.resolve(ref)
+        if (!resolved) {
+          await pool.updateAccount(entry.id, { refreshable: false }).catch(() => {})
+          continue
+        }
+        const credential = parsePhanthyCredential(resolved.value)
+        if (credential === undefined) {
+          await pool.updateAccount(entry.id, { refreshable: false }).catch(() => {})
+          continue
+        }
+        // 与 phantrycode2api 的 AutoRecover 对齐：一次 refresh 失败只说明
+        // 当时的 refresh_token 不可用，仍周期性读原凭据重试；不提前把账号
+        // 永久拉黑。isPhanthyRefreshable 为 false 时 refreshAccountCredential
+        // 会抛 RefreshTokenExpiredError，本轮再如实落 refreshable=false。
         if (isPhanthyExpired(credential) || shouldRefreshSoon(phanthyCredentialExpiresAtMs(credential))) {
           await this.refreshAccountCredential(entry.credentialRef, pool, entry.id)
         } else {
@@ -238,7 +249,7 @@ export class PhanthyAuth extends Service {
    *
    * access token 只有约 30 分钟寿命，参考实现同样是 summary 401 后刷新重试。
    */
-  async fetchCreditBalanceDetailed(credential: PhanthyCredential): Promise<{
+  async fetchCreditBalanceDetailed(credential: PhanthyCredential, context?: CredentialRefreshContext): Promise<{
     balance: CreditBalance | null
     error?: string
   }> {
@@ -247,8 +258,7 @@ export class PhanthyAuth extends Service {
     if (!isPhanthyRefreshable(credential)) return first
     if (!this.isAccessTokenStale(credential) && !this.isCredentialRejected(first.error)) return first
     try {
-      const refreshed = await this.refreshCredentialValue(credential)
-      await this.persistRefreshedCredential(refreshed)
+      const refreshed = await this.refreshCredentialInContext(credential, context)
       return await fetchPhanthyCreditBalanceDetailed(this.product, refreshed, this.fetcher, this.dataDir)
     } catch (error) {
       return { balance: null, error: error instanceof Error ? error.message : String(error) }
@@ -260,7 +270,7 @@ export class PhanthyAuth extends Service {
    *
    * 附属端点部分失败时仍返回可用明细，errors 保留具体原因。
    */
-  async fetchCreditDetailDetailed(credential: PhanthyCredential): Promise<{
+  async fetchCreditDetailDetailed(credential: PhanthyCredential, context?: CredentialRefreshContext): Promise<{
     detail: PhanthyCreditDetail | null
     balance: CreditBalance | null
     error?: string
@@ -270,8 +280,7 @@ export class PhanthyAuth extends Service {
     if (!isPhanthyRefreshable(credential)) return first
     if (!this.isAccessTokenStale(credential) && !this.isCredentialRejected(first.error)) return first
     try {
-      const refreshed = await this.refreshCredentialValue(credential)
-      await this.persistRefreshedCredential(refreshed)
+      const refreshed = await this.refreshCredentialInContext(credential, context)
       return await fetchPhanthyCreditDetail(this.product, refreshed, this.fetcher, this.dataDir)
     } catch (error) {
       return {
@@ -288,13 +297,12 @@ export class PhanthyAuth extends Service {
   }
 
   /** 领取每日登录奖励；凭据被拒绝或近到期时自动续期一次并重试。 */
-  async claimDailyLoginDetailed(credential: PhanthyCredential): Promise<ClaimOutcome> {
+  async claimDailyLoginDetailed(credential: PhanthyCredential, context?: CredentialRefreshContext): Promise<ClaimOutcome> {
     const first = await claimPhanthyDailyLogin(this.product, credential, this.dataDir, this.fetcher)
     if (first.kind !== 'failed' || !isPhanthyRefreshable(credential)) return first
     if (!this.isAccessTokenStale(credential) && !this.isCredentialRejected(first.message)) return first
     try {
-      const refreshed = await this.refreshCredentialValue(credential)
-      await this.persistRefreshedCredential(refreshed)
+      const refreshed = await this.refreshCredentialInContext(credential, context)
       return await claimPhanthyDailyLogin(this.product, refreshed, this.dataDir, this.fetcher)
     } catch (error) {
       return { kind: 'failed', code: -1, message: error instanceof Error ? error.message : String(error) }
@@ -302,7 +310,7 @@ export class PhanthyAuth extends Service {
   }
 
   /** 读取活动状态；近到期或凭据被拒绝时自动续期一次并重试。 */
-  async fetchActivitiesSummaryDetailed(credential: PhanthyCredential): Promise<{
+  async fetchActivitiesSummaryDetailed(credential: PhanthyCredential, context?: CredentialRefreshContext): Promise<{
     summary: import('./phanthy-credits.js').PhanthyActivitiesSummary | null
     error?: string
   }> {
@@ -316,8 +324,7 @@ export class PhanthyAuth extends Service {
     if (!isPhanthyRefreshable(credential)) return first
     if (!this.isAccessTokenStale(credential) && !this.isCredentialRejected(first.error)) return first
     try {
-      const refreshed = await this.refreshCredentialValue(credential)
-      await this.persistRefreshedCredential(refreshed)
+      const refreshed = await this.refreshCredentialInContext(credential, context)
       return await fetchPhanthyActivitiesSummaryDetailed(
         this.product,
         refreshed,
@@ -349,8 +356,64 @@ export class PhanthyAuth extends Service {
     return uid.length > 0 ? { ...next, uid } : next
   }
 
-  private async persistRefreshedCredential(credential: PhanthyCredential): Promise<void> {
-    await this.ctx.credentials.set(credentialRef(this.credentialRefName), JSON.stringify(credential))
+  private async refreshCredentialInContext(
+    credential: PhanthyCredential,
+    context?: CredentialRefreshContext,
+  ): Promise<PhanthyCredential> {
+    const refName = context?.refName ?? this.credentialRefName
+    const refreshed = await this.withCredentialRefreshLock(
+      refName,
+      async () => {
+        // 锁内重新解析当前凭据：若另一条路径已经完成刷新，绝不用闭包里的
+        // 旧 refresh_token 再发一次请求。
+        const resolved = await this.ctx.credentials.resolve(credentialRef(refName))
+        const current = resolved === undefined ? undefined : parsePhanthyCredential(resolved.value)
+        if (current !== undefined && this.hasCredentialValue(current)) {
+          return this.refreshCredentialValue(current)
+        }
+        return this.refreshCredentialValue(credential)
+      },
+    )
+    await this.persistRefreshedCredential(refreshed, refName)
+    if (context?.pool !== undefined) {
+      await syncAccountExpiry({
+        pool: context.pool,
+        provider: this.product.id,
+        credential: refreshed,
+        accessors: PHANTHY_EXPIRY_ACCESSORS,
+        accountId: context.accountId,
+        tag: '[phanthy]',
+        warn: (message) => this.ctx.logger?.warn?.(message),
+      })
+    }
+    return refreshed
+  }
+
+  private async withCredentialRefreshLock<T>(
+    refName: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.credentialRefreshLocks.get(refName) ?? Promise.resolve()
+    const next = previous.catch(() => {}).then(operation)
+    this.credentialRefreshLocks.set(refName, next)
+    try {
+      return await next
+    } finally {
+      if (this.credentialRefreshLocks.get(refName) === next) {
+        this.credentialRefreshLocks.delete(refName)
+      }
+    }
+  }
+
+  private hasCredentialValue(credential: PhanthyCredential): boolean {
+    return credential.access_token.trim().length > 0 && credential.refresh_token.trim().length > 0
+  }
+
+  private async persistRefreshedCredential(
+    credential: PhanthyCredential,
+    refName: string = this.credentialRefName,
+  ): Promise<void> {
+    await this.ctx.credentials.set(credentialRef(refName), JSON.stringify(credential))
     this.lastRefreshError = undefined
   }
 
@@ -419,4 +482,11 @@ export class PhanthyAuth extends Service {
 /** 距过期不足 1 小时则进入续期窗口。 */
 function shouldRefreshSoon(expiresAtMs: number | undefined): boolean {
   return expiresAtMs === undefined || expiresAtMs - Date.now() <= 60 * 60 * 1000
+}
+
+/** 账号池凭据续期上下文；未传时兼容默认单凭据路径。 */
+export interface CredentialRefreshContext {
+  refName: string
+  pool?: AccountPool
+  accountId?: string
 }

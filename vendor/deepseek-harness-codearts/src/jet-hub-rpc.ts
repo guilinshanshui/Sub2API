@@ -942,7 +942,11 @@ function registerJetHubEndpoints(
     if (provider === PHANTHY.id) {
       const value = await collectClaimResults<PhanthyCredential, undefined>(accounts, undefined, {
         resolve: (ref) => ctx.credentials.resolve(ref),
-        claim: (credential) => phanthy.claimDailyLoginDetailed(credential),
+        claim: (credential, _product, entry) => phanthy.claimDailyLoginDetailed(credential, {
+          refName: entry.credentialRef,
+          accountId: entry.id,
+          pool,
+        }),
         precheckStatus: false,
         warn: (msg) => ctx.logger?.warn?.(msg),
       })
@@ -1498,7 +1502,11 @@ function registerJetHubEndpoints(
                 const resolved = await ctx.credentials.resolve(credentialRef(entry.credentialRef))
                 if (resolved !== undefined) {
                   const credential = JSON.parse(resolved.value) as PhanthyCredential
-                  const detailed = await phanthy.fetchCreditBalanceDetailed(credential)
+                  const detailed = await phanthy.fetchCreditBalanceDetailed(credential, {
+                    refName: entry.credentialRef,
+                    accountId: entry.id,
+                    pool,
+                  })
                   await persistCreditBalance(pool, entry, detailed.balance, detailed.error)
                 }
               }
@@ -1938,7 +1946,11 @@ function registerJetHubEndpoints(
               const resolved = await ctx.credentials.resolve(credentialRef(entry.credentialRef))
               if (resolved !== undefined) {
                 const credential = JSON.parse(resolved.value) as PhanthyCredential
-                const result = await phanthy.fetchActivitiesSummaryDetailed(credential)
+                const result = await phanthy.fetchActivitiesSummaryDetailed(credential, {
+                  refName: entry.credentialRef,
+                  accountId: entry.id,
+                  pool,
+                })
                 const summary = result.summary
                 if (summary !== null) {
                   status = {
@@ -2220,7 +2232,11 @@ function registerJetHubEndpoints(
               values.push({ accountId: account.id, nickname: account.nickname, balance: null, error: '凭据解析失败' })
               continue
             }
-            const result = await phanthy.fetchCreditDetailDetailed(credential)
+            const result = await phanthy.fetchCreditDetailDetailed(credential, {
+              refName: account.credentialRef,
+              accountId: account.id,
+              pool,
+            })
             await persistCreditBalance(
               pool,
               account,
