@@ -373,6 +373,7 @@ export function AccountsPage() {
   const [tasksBusy, setTasksBusy] = useState(false)
   const [creditResult, setCreditResult] = useState<CreditsClaimResult>()
   const [balanceResult, setBalanceResult] = useState<CreditsBalanceAccount[]>()
+  const [autoBalanceRefreshing, setAutoBalanceRefreshing] = useState(false)
 
   const load = async (quiet = false) => {
     if (!quiet) setLoading(true)
@@ -392,9 +393,34 @@ export function AccountsPage() {
     }
   }
 
+  const refreshVisibleBalances = async (activeProviderFilter: string) => {
+    if (autoBalanceRefreshing) return
+    setAutoBalanceRefreshing(true)
+    try {
+      if (activeProviderFilter !== '') {
+        await apiPost(`/api/providers/${encodeURIComponent(activeProviderFilter)}/credits/balances`, {})
+      } else {
+        const accountData = await apiGet<{ accounts: ProviderAccount[] }>('/api/accounts')
+        const providers = [...new Set(accountData.accounts.filter((account) => account.enabled).map((account) => account.provider))]
+        for (const provider of providers) {
+          await apiPost(`/api/providers/${encodeURIComponent(provider)}/credits/balances`, {})
+        }
+      }
+      await load(true)
+    } catch {
+      // Page load should not become an error banner just because an upstream is temporarily unavailable.
+    } finally {
+      setAutoBalanceRefreshing(false)
+    }
+  }
+
   useEffect(() => {
     void load()
   }, [])
+
+  useEffect(() => {
+    void refreshVisibleBalances(providerFilter)
+  }, [providerFilter])
 
   useEffect(() => {
     const timer = window.setInterval(() => void load(true), 15_000)
