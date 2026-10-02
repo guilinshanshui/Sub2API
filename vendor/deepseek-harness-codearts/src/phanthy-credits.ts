@@ -66,7 +66,7 @@ function activityHeaders(
     Accept: 'application/json',
     Authorization: `Bearer ${credential.access_token}`,
     'anthropic-beta': PHANTHY_OAUTH_BETA,
-    'User-Agent': `phanthycode2api/${product.desktopVersion}`,
+    'User-Agent': 'phanthycode2api/1.0',
   }
 }
 
