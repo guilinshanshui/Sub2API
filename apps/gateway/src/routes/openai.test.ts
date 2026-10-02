@@ -41,6 +41,8 @@ async function createFixture(): Promise<Fixture> {
     requestTimeoutMs: 30_000,
     schedulerIntervalMs: 0,
     balanceRefreshMinutes: 0,
+    systemPromptMode: 'passthrough',
+    systemPrompt: 'test system prompt',
     corsOrigins: [],
     logLevel: 'silent',
   }
@@ -197,6 +199,34 @@ describe('OpenAI routes', () => {
     })
     expect(response.statusCode).toBe(200)
     expect(captured?.system).toBe('You are a helpful coding agent.')
+  })
+
+  it('replaces the client system prompt when replace mode is enabled', async () => {
+    const { app, storage, runtime } = await createFixture()
+    await storage.updateSettings({ systemPromptMode: 'replace' })
+    let captured: { system?: string } | undefined
+    runtime.llm.prepareCall = vi.fn(async () => ({
+      config: {},
+      stream: async function* (options: { system?: string }) {
+        captured = options
+        yield { type: 'text-delta', text: 'ok' }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      },
+    }))
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/responses',
+      headers: { authorization: 'Bearer sk-test' },
+      payload: {
+        model: 'provider-a/shared',
+        input: 'Hi',
+        instructions: 'You are Codex, a CLI coding agent built by OpenAI.',
+      },
+    })
+    expect(response.statusCode).toBe(200)
+    expect(captured?.system).toBe('test system prompt')
+    expect(captured?.system).not.toContain('Codex')
   })
 
   it('streams function call items for the Responses API', async () => {

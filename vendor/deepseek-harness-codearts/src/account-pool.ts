@@ -53,7 +53,9 @@ const EMPTY_MODEL_SET: ReadonlySet<string> = new Set<string>()
  * 两者都不可用时退化为内存态，保证不抛错。
  */
 export class AccountPool {
-  private readonly inFlight = new Map<string, number>()
+  private readonly inFlight = new Map<string, number[]>()
+  // 每条在途名额带获取时间戳（而非只记计数）：漏释放的名额会因超时被
+  // 自动剔除，账号不会因一条漏掉 release 的请求而永久退出候选集。
   /** 持久化后端；两个后端都不可用时是仅内存实现。 */
   private readonly store: JetHubStore
   /**
@@ -645,6 +647,7 @@ export class AccountPool {
       cooldownBaseMs: configured?.cooldownBaseMs ?? 2 * 60 * 1000,
       cooldownMaxMs: configured?.cooldownMaxMs ?? 60 * 60 * 1000,
       maxInFlight: configured?.maxInFlight ?? 3,
+      inFlightLeaseMs: configured?.inFlightLeaseMs ?? 30 * 60 * 1000,
       softRateBaseMs: configured?.softRateBaseMs ?? 10 * 60 * 1000,
       softRateMaxMs: configured?.softRateMaxMs ?? 2 * 60 * 60 * 1000,
       degradeThreshold: configured?.degradeThreshold ?? 5,
@@ -656,7 +659,8 @@ export class AccountPool {
   /** 当前正在上游请求中执行的账号数；运行时状态，不写入备份。 */
   inFlightCounts(): Record<string, number> {
     const result: Record<string, number> = {}
-    for (const [accountId, count] of this.inFlight) {
+    for (const [accountId] of this.inFlight) {
+      const count = this.liveInFlight(accountId)
       if (count > 0) result[accountId] = count
     }
     return result
@@ -670,21 +674,22 @@ export class AccountPool {
    */
   acquireInFlight(accountId: string): boolean {
     const limit = this.governanceConfig().maxInFlight
-    if (limit <= 0) {
-      this.inFlight.set(accountId, (this.inFlight.get(accountId) ?? 0) + 1)
-      return true
-    }
-    const current = this.inFlight.get(accountId) ?? 0
-    if (current >= limit) return false
-    this.inFlight.set(accountId, current + 1)
+    const live = this.liveInFlight(accountId)
+    if (limit > 0 && live >= limit) return false
+    const leases = this.inFlight.get(accountId) ?? []
+    leases.push(Date.now())
+    this.inFlight.set(accountId, leases)
     return true
   }
 
   /** 释放一次由 `acquireInFlight` 占用的在途名额。 */
   releaseInFlight(accountId: string): void {
-    const current = this.inFlight.get(accountId) ?? 0
-    if (current <= 1) this.inFlight.delete(accountId)
-    else this.inFlight.set(accountId, current - 1)
+    const leases = this.inFlight.get(accountId)
+    if (leases === undefined) return
+    // 释放最早的那条（FIFO）：无论释放的是哪一次请求，计数都等价。
+    leases.shift()
+    if (leases.length === 0) this.inFlight.delete(accountId)
+    else this.inFlight.set(accountId, leases)
   }
 
   /** 停止插件时统一清空运行时在途计数，避免重启前的旧名额残留。 */
@@ -692,8 +697,30 @@ export class AccountPool {
     this.inFlight.clear()
   }
 
+  /**
+   * 剔除该账号上已超过 `inFlightLeaseMs` 的名额，并返回剩余（真实在途）条数。
+   *
+   * 之所以需要：在途名额依赖 `releaseInFlight` 显式归还，而早期实现里
+   * 根本没有调用点，名额只增不减 —— 账号很快触达 `maxInFlight` 就从候选集
+   * 里消失，表现为「池里明明有账号却总报无可用/未配置凭据」。
+   * 按时间戳过期可保证即使漏释放，账号也能自动回到池中。
+   */
+  private liveInFlight(accountId: string): number {
+    const leases = this.inFlight.get(accountId)
+    if (leases === undefined || leases.length === 0) return 0
+    const leaseMs = this.governanceConfig().inFlightLeaseMs
+    const live = leaseMs > 0
+      ? leases.filter(acquiredAt => acquiredAt > Date.now() - leaseMs)
+      : [...leases]
+    if (live.length === 0) this.inFlight.delete(accountId)
+    else if (live.length !== leases.length) this.inFlight.set(accountId, live)
+    return live.length
+  }
+
   /** 记录一次上游请求失败；达到阈值后自动冷却。 */
   async reportAccountFailure(accountId: string, reason?: string): Promise<void> {
+    // 失败的请求同样要归还名额；未归还的账号几轮失败后就永久退出候选集。
+    this.releaseInFlight(accountId)
     const status = Number(/^HTTP (\d{3})$/.exec(reason ?? '')?.[1])
     if (status === 429) return this.reportAccountRateLimited(accountId, reason)
     if (status >= 500 || status === 408) return this.reportAccountDegrade(accountId, reason)
@@ -779,6 +806,10 @@ export class AccountPool {
 
   /** 记录一次上游请求成功；清空失败计数并解除冷却。 */
   async reportAccountSuccess(accountId: string): Promise<void> {
+    // 请求结束（无论成败）都要归还 `resolveCredential` 占下的在途名额。
+    // 必须放在下面「无变化即 return」之前：成功请求往往本来就没有冷却可清，
+    // 放在后面就永远不会执行 —— 名额只增不减会把账号从候选集里饿死。
+    this.releaseInFlight(accountId)
     const accounts = this.readAccounts()
     const idx = accounts.findIndex(a => a.id === accountId)
     const entry = accounts[idx]
@@ -848,7 +879,7 @@ export class AccountPool {
         if ((a.softRateCooldownUntil ?? 0) > Date.now()) return false
         if ((a.degradeCooldownUntil ?? 0) > Date.now()) return false
         const inFlightLimit = this.governanceConfig().maxInFlight
-        if (inFlightLimit > 0 && (this.inFlight.get(a.id) ?? 0) >= inFlightLimit) return false
+        if (inFlightLimit > 0 && this.liveInFlight(a.id) >= inFlightLimit) return false
         return true
       })
       .filter(a => {
@@ -914,6 +945,9 @@ export class AccountPool {
    * 避免"写 A 的限流 → 读旧快照 → 写 B 的限流"把 A 的记录抹掉。
    */
   async updateModelRateLimit(accountId: string, modelId: string, resetAtMs: number): Promise<void> {
+    // 限流 / 安全策略拦截也是该类请求的终点（适配器直接 continue 换号，不再调
+    // report*），故这里同样归还名额。
+    this.releaseInFlight(accountId)
     const accounts = this.readAccounts()
     const idx = accounts.findIndex(a => a.id === accountId)
     if (idx === -1) {

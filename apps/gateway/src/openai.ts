@@ -90,6 +90,8 @@ interface StreamState {
   reasoning: string
   toolCalls: Map<number, CompletionToolCall>
   finishReason: CompletionResult['finishReason']
+  /** Facts from a terminal `error`/`aborted` finish chunk; drives the thrown error. */
+  failure?: { message?: string; code?: string }
   usage: CompletionResult['usage']
 }
 
@@ -595,6 +597,18 @@ export async function createCompletion(
     applyChunk(state, chunk)
     onChunk?.(chunk, state)
   }
+  // A terminal error/aborted finish means the upstream turn produced no
+  // usable answer (rate limited, policy blocked, or an empty completed
+  // response). Surfacing it as an error is required: returning a 200 with an
+  // empty message makes clients such as Codex end the session silently.
+  if (state.finishReason === 'error') throw upstreamFailureError(state.failure)
+  if (state.text.length === 0 && state.reasoning.length === 0 && state.toolCalls.size === 0) {
+    throw new OpenAiRequestError(
+      `${request.provider}: model returned a completed response with no content`,
+      502,
+      'empty_response',
+    )
+  }
   return {
     text: state.text,
     reasoning: state.reasoning,
@@ -642,12 +656,45 @@ function applyChunk(state: StreamState, chunk: StreamChunk): void {
     case 'finish':
       if (chunk.reason.kind === 'tool-calls') state.finishReason = 'tool_calls'
       else if (chunk.reason.kind === 'max-tokens') state.finishReason = 'length'
-      else if (chunk.reason.kind === 'error' || chunk.reason.kind === 'aborted') state.finishReason = 'error'
+      else if (chunk.reason.kind === 'error' || chunk.reason.kind === 'aborted') {
+        // Adapters report upstream failures as a terminal finish chunk instead of
+        // throwing (e.g. an HTTP 200 whose SSE carried an error frame, or a
+        // completed response with no content). Keep the facts so the caller can
+        // raise a real error; swallowing them here is what made Codex end the
+        // turn silently on an empty 200.
+        state.finishReason = 'error'
+        const failure = chunk.reason.failure
+        state.failure = {
+          ...typeof failure.message === 'string' ? { message: failure.message } : {},
+          ...typeof failure.code === 'string' ? { code: failure.code } : {},
+        }
+      }
       else state.finishReason = 'stop'
       break
     default:
       break
   }
+}
+
+/** Provider-neutral failure code -> HTTP status, so callers can act on it. */
+const UPSTREAM_STATUS_BY_CODE: Record<string, number> = {
+  RATE_LIMIT: 429,
+  QUOTA_EXCEEDED: 429,
+  AUTH: 401,
+  MISSING_CREDENTIAL: 401,
+  INVALID_REQUEST: 400,
+  UNSUPPORTED_CONTENT: 400,
+  NOT_FOUND: 404,
+}
+
+/** Turn a terminal adapter failure into an HTTP error instead of an empty 200. */
+function upstreamFailureError(failure: StreamState['failure']): OpenAiRequestError {
+  const code = failure?.code ?? 'upstream_error'
+  const status = UPSTREAM_STATUS_BY_CODE[code] ?? 502
+  const message = failure?.message !== undefined && failure.message.length > 0
+    ? failure.message
+    : `Upstream model call failed (${code}).`
+  return new OpenAiRequestError(message, status, code.toLowerCase())
 }
 
 export function chatCompletionResponse(

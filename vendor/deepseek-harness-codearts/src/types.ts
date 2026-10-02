@@ -651,6 +651,14 @@ export interface AutomationConfig {
     cooldownMaxMs?: number
     /** 单账号最大并发在途请求数，0 表示不限。 */
     maxInFlight?: number
+    /**
+     * 单条在途名额的最长有效期（毫秒）。
+     *
+     * 在途名额由 `resolveCredential` 取得、本应在请求结束时释放；一旦某条
+     * 请求路径漏掉释放，该账号会永久占满 `maxInFlight` 名额、从此再也选不中。
+     * 这里给每条名额加硬过期，使漏释放最多影响一段时间，账号会自动回到池中。
+     */
+    inFlightLeaseMs?: number
     /** 429 短冷却基数（毫秒）。 */
     softRateBaseMs?: number
     /** 429 短冷却上限（毫秒）。 */

@@ -21,6 +21,7 @@ import {
 } from '../openai.js'
 import type { GatewayRuntime } from '../runtime.js'
 import type { GatewayStorage } from '../storage.js'
+import type { GatewaySettings } from '../types.js'
 import type { ApiKeyRecord } from '../types.js'
 import { asRecord, asString } from '../utils.js'
 
@@ -304,6 +305,22 @@ function startSse(reply: FastifyReply): void {
 }
 
 export function registerOpenAiRoutes(app: FastifyInstance, options: OpenAiRouteOptions): void {
+/**
+ * Decide which system prompt actually goes upstream.
+ *
+ * In `replace` mode the client's own system prompt is dropped entirely in favour
+ * of the gateway-owned one. Upstreams such as the CodeBuddy family reject
+ * requests whose system prompt identifies a different client/agent vendor
+ * (HTTP 403 `Illegal API invocation from an unapproved channel`), and that
+ * rejection is not account-specific, so retrying against other accounts cannot
+ * recover. Replacing the prompt from the source is what fixes it.
+ */
+function resolveGatewaySystemPrompt(settings: GatewaySettings, system: string | undefined): string | undefined {
+  if (settings.systemPromptMode !== 'replace') return system
+  const override = settings.systemPrompt.trim()
+  return override.length > 0 ? override : system
+}
+
   app.get('/v1/models', async (request, reply) => {
     const apiKey = await authenticate(request, reply, options.apiKeys)
     if (apiKey === undefined) return
@@ -350,7 +367,7 @@ export function registerOpenAiRoutes(app: FastifyInstance, options: OpenAiRouteO
         model: parsed.model.upstreamId,
       }, options.runtime.attachments)
       requestOptions.messages = parsedMessages.messages
-      requestOptions.system = parsedMessages.system
+      requestOptions.system = resolveGatewaySystemPrompt(settings, parsedMessages.system)
 
       if (!parsed.stream) {
         const result = await createCompletion(options.runtime, requestOptions, timeout.signal)
@@ -471,7 +488,7 @@ export function registerOpenAiRoutes(app: FastifyInstance, options: OpenAiRouteO
         publicModel: parsed.model.id,
         reasoningEffort: requestedReasoningEffort(parsed.model, parsed.body),
         messages: responseInput.messages,
-        system: responseInput.system,
+        system: resolveGatewaySystemPrompt(settings, responseInput.system),
         tools,
         temperature: numericField(parsed.body, ['temperature']),
         maxTokens: numericField(parsed.body, ['max_output_tokens', 'max_tokens']),

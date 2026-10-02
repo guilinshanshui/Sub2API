@@ -22,6 +22,7 @@ interface LogFile {
 
 const MAX_USAGE_RECORDS = 10_000
 const MAX_LOG_RECORDS = 5_000
+const MAX_SYSTEM_PROMPT_CHARS = 20_000
 
 function parseSettings(raw: string, fallback: GatewaySettings): GatewaySettings {
   const parsed = JSON.parse(raw) as Partial<SettingsFile>
@@ -39,6 +40,12 @@ function parseSettings(raw: string, fallback: GatewaySettings): GatewaySettings 
       ? Math.floor(settings.requestTimeoutMs as number)
       : fallback.requestTimeoutMs,
     logLevel: typeof settings.logLevel === 'string' && settings.logLevel.length > 0 ? settings.logLevel : fallback.logLevel,
+    systemPromptMode: settings.systemPromptMode === 'passthrough' || settings.systemPromptMode === 'replace'
+      ? settings.systemPromptMode
+      : fallback.systemPromptMode,
+    systemPrompt: typeof settings.systemPrompt === 'string' && settings.systemPrompt.trim().length > 0
+      ? settings.systemPrompt.slice(0, MAX_SYSTEM_PROMPT_CHARS)
+      : fallback.systemPrompt,
   }
 }
 
@@ -66,6 +73,8 @@ export class GatewayStorage {
       defaultModel: config.defaultModel,
       allowedModels: [...config.allowedModels],
       requestTimeoutMs: config.requestTimeoutMs,
+      systemPromptMode: config.systemPromptMode,
+      systemPrompt: config.systemPrompt,
       logLevel: config.logLevel,
     }
   }
@@ -91,6 +100,12 @@ export class GatewayStorage {
         requestTimeoutMs: patch.requestTimeoutMs === undefined
           ? this.settings.requestTimeoutMs
           : Math.max(1_000, Math.floor(patch.requestTimeoutMs)),
+        systemPromptMode: patch.systemPromptMode === undefined
+          ? this.settings.systemPromptMode
+          : patch.systemPromptMode,
+        systemPrompt: patch.systemPrompt === undefined || patch.systemPrompt.trim().length === 0
+          ? this.settings.systemPrompt
+          : patch.systemPrompt.slice(0, MAX_SYSTEM_PROMPT_CHARS),
       }
       this.settings = next
       await this.saveJson(this.settingsPath, { version: 1, settings: next } satisfies SettingsFile)

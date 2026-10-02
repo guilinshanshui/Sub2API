@@ -34,6 +34,8 @@ interface SettingsDraft {
   defaultModel: string
   allowedModels: string
   requestTimeoutMs: string
+  systemPromptMode: 'passthrough' | 'replace'
+  systemPrompt: string
   logLevel: string
 }
 
@@ -49,6 +51,8 @@ function toDraft(settings: GatewaySettings): SettingsDraft {
     defaultModel: settings.defaultModel,
     allowedModels: settings.allowedModels.join('\n'),
     requestTimeoutMs: String(settings.requestTimeoutMs),
+    systemPromptMode: settings.systemPromptMode,
+    systemPrompt: settings.systemPrompt,
     logLevel: settings.logLevel,
   }
 }
@@ -134,6 +138,8 @@ export function SettingsPage() {
         defaultModel: draft.defaultModel.trim(),
         allowedModels: parseLines(draft.allowedModels),
         requestTimeoutMs: Math.floor(timeout),
+        systemPromptMode: draft.systemPromptMode,
+        systemPrompt: draft.systemPrompt,
         logLevel: draft.logLevel,
       })
       setSettings(result)
@@ -276,6 +282,29 @@ export function SettingsPage() {
                       ]}
                       onChange={(value) => setDraft({ ...draft, logLevel: value })}
                     />
+                  </label>
+                </div>
+                <div className="form-grid">
+                  <label className="field">
+                    <span>系统提示词处理</span>
+                    <SelectMenu
+                      value={draft.systemPromptMode}
+                      ariaLabel="系统提示词处理"
+                      options={[
+                        { value: 'replace', label: '替换（推荐）', description: '用网关提示词覆盖客户端 system，规避上游身份拦截' },
+                        { value: 'passthrough', label: '透传', description: '原样转发客户端自带的 system 提示词' },
+                      ]}
+                      onChange={(value) => setDraft({ ...draft, systemPromptMode: value === 'passthrough' ? 'passthrough' : 'replace' })}
+                    />
+                  </label>
+                  <label className="field">
+                    <span>网关系统提示词</span>
+                    <textarea
+                      rows={4}
+                      value={draft.systemPrompt}
+                      onChange={(event) => setDraft({ ...draft, systemPrompt: event.target.value })}
+                    />
+                    <small>替换模式下，Codex / Claude Code 等客户端自带的 system 会被这段文本覆盖，用来规避上游的渠道身份拦截。</small>
                   </label>
                 </div>
                 <div className="form-actions">

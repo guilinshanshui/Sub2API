@@ -22,6 +22,8 @@ const settings: GatewaySettings = {
   defaultModel: '',
   allowedModels: [],
   requestTimeoutMs: 30_000,
+  systemPromptMode: 'replace',
+  systemPrompt: 'test system prompt',
   logLevel: 'info',
 }
 
@@ -278,5 +280,86 @@ describe('createCompletion', () => {
     expect(result.toolCalls).toEqual([{ id: 'call_3', name: 'lookup', arguments: '{"id":3}' }])
     expect(result.usage.totalTokens).toBe(9)
     expect(result.finishReason).toBe('tool_calls')
+  })
+
+  it('throws instead of returning an empty 200 when the upstream finishes with error', async () => {
+    const runtime = {
+      llm: {
+        prepareCall: vi.fn(async () => ({
+          config: {},
+          stream: async function* () {
+            // What the buddy adapter yields for an upstream 200 whose SSE carried
+            // only an error frame: no text, no tool calls, usage all zero.
+            yield {
+              type: 'finish',
+              reason: {
+                kind: 'error',
+                failure: { message: 'model returned a completed response with no content', code: 'EMPTY_RESPONSE' },
+              },
+            }
+          },
+        })),
+      },
+    } as unknown as GatewayRuntime
+
+    const error = await createCompletion(runtime, {
+      provider: 'buddy',
+      model: 'deepseek-v4.1-flash',
+      publicModel: 'buddy/deepseek-v4.1-flash',
+      messages: [],
+    }, new AbortController().signal).catch((thrown: unknown) => thrown)
+
+    expect(error).toBeInstanceOf(OpenAiRequestError)
+    expect((error as OpenAiRequestError).status).toBe(502)
+    expect((error as OpenAiRequestError).message).toMatch(/no content/u)
+  })
+
+  it('maps provider rate-limit failures onto HTTP 429', async () => {
+    const runtime = {
+      llm: {
+        prepareCall: vi.fn(async () => ({
+          config: {},
+          stream: async function* () {
+            yield {
+              type: 'finish',
+              reason: {
+                kind: 'error',
+                failure: { message: 'all accounts are rate limited', code: 'QUOTA_EXCEEDED' },
+              },
+            }
+          },
+        })),
+      },
+    } as unknown as GatewayRuntime
+
+    const error = await createCompletion(runtime, {
+      provider: 'buddy',
+      model: 'deepseek-v4.1-flash',
+      publicModel: 'buddy/deepseek-v4.1-flash',
+      messages: [],
+    }, new AbortController().signal).catch((thrown: unknown) => thrown)
+
+    expect(error).toBeInstanceOf(OpenAiRequestError)
+    expect((error as OpenAiRequestError).status).toBe(429)
+  })
+
+  it('throws when a stream ends with no text, reasoning, or tool calls', async () => {
+    const runtime = {
+      llm: {
+        prepareCall: vi.fn(async () => ({
+          config: {},
+          stream: async function* () {
+            yield { type: 'finish', reason: { kind: 'stop' } }
+          },
+        })),
+      },
+    } as unknown as GatewayRuntime
+
+    await expect(createCompletion(runtime, {
+      provider: 'provider-a',
+      model: 'shared',
+      publicModel: 'provider-a/shared',
+      messages: [],
+    }, new AbortController().signal)).rejects.toBeInstanceOf(OpenAiRequestError)
   })
 })

@@ -162,6 +162,8 @@ const settingsSchema = z.object({
   defaultModel: z.string().optional(),
   allowedModels: z.array(z.string()).optional(),
   requestTimeoutMs: z.number().int().positive().optional(),
+  systemPromptMode: z.enum(['passthrough', 'replace']).optional(),
+  systemPrompt: z.string().max(20_000).optional(),
   logLevel: z.string().optional(),
 })
 

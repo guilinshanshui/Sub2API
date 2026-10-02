@@ -205,6 +205,8 @@ export interface GatewaySettings {
   defaultModel: string
   allowedModels: string[]
   requestTimeoutMs: number
+  systemPromptMode: 'passthrough' | 'replace'
+  systemPrompt: string
   logLevel: string
 }
 

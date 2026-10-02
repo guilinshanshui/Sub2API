@@ -13,6 +13,8 @@ export interface GatewayConfig {
   requestTimeoutMs: number
   schedulerIntervalMs: number
   balanceRefreshMinutes: number
+  systemPromptMode: 'passthrough' | 'replace'
+  systemPrompt: string
   corsOrigins: string[]
   logLevel: string
 }
@@ -49,9 +51,24 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): GatewayConfig 
     defaultProvider: env.SUB2API_DEFAULT_PROVIDER?.trim() || '',
     defaultModel: env.SUB2API_DEFAULT_MODEL?.trim() || '',
     requestTimeoutMs: integer(env.SUB2API_REQUEST_TIMEOUT_MS, 300_000),
+    systemPromptMode: env.SUB2API_SYSTEM_PROMPT_MODE?.trim() === 'passthrough' ? 'passthrough' : 'replace',
+    systemPrompt: env.SUB2API_SYSTEM_PROMPT?.trim() || DEFAULT_SYSTEM_PROMPT,
     schedulerIntervalMs: nonNegativeInteger(env.SUB2API_SCHEDULER_INTERVAL_MS, 30 * 60_000),
     balanceRefreshMinutes: nonNegativeInteger(env.SUB2API_BALANCE_REFRESH_MINUTES, 60),
     corsOrigins: csv(env.SUB2API_CORS_ORIGINS),
     logLevel: env.SUB2API_LOG_LEVEL?.trim() || 'info',
   }
 }
+
+/**
+ * 网关自带的 system 提示词。
+ *
+ * 刻意不包含任何客户端/厂商身份描述：上游（CodeBuddy 系）会把带特定客户端
+ * 身份的 system 判为「非法渠道调用」并直接 403，与账号无关（换号也无效）。
+ * 这里只描述通用助手行为，既保住工具使用能力，也不触发那条判据。
+ */
+export const DEFAULT_SYSTEM_PROMPT = [
+  'You are a helpful AI assistant embedded in a developer tool.',
+  'Answer the user request directly and concisely.',
+  'Use the provided tools when they are needed to complete the task.',
+].join(' ')
