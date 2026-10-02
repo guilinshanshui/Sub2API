@@ -1,6 +1,7 @@
 @echo off
 setlocal
 set "ROOT=%~dp0"
+set "SUB2API_WEB_DIST=%ROOT%web\dist"
 
 where node >nul 2>&1
 if %errorlevel% neq 0 (
