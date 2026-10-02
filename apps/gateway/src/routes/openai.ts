@@ -265,9 +265,13 @@ async function persistCall(
   }
 }
 
-function writeSse(reply: FastifyReply, event: string, data: unknown): void {
+function writeSse(reply: FastifyReply, event: string, data: unknown, options?: { omitEventName?: boolean }): void {
   if (reply.raw.destroyed || reply.raw.writableEnded) return
-  reply.raw.write(typeof data === 'string' ? `event: ${event}\ndata: ${data}\n\n` : sse(event, data))
+  if (typeof data === 'string') {
+    reply.raw.write(options?.omitEventName ? `data: ${data}\n\n` : `event: ${event}\ndata: ${data}\n\n`)
+  } else {
+    reply.raw.write(options?.omitEventName ? `data: ${JSON.stringify(data)}\n\n` : sse(event, data))
+  }
 }
 
 function startSse(reply: FastifyReply): void {
@@ -336,12 +340,13 @@ export function registerOpenAiRoutes(app: FastifyInstance, options: OpenAiRouteO
       }
 
       startSse(reply)
-      writeSse(reply, 'message', chatCompletionChunk(parsed.id, parsed.publicModel, parsed.created, { role: 'assistant' }))
+      reply.raw.write(': heartbeat\n\n')
+      writeSse(reply, 'message', chatCompletionChunk(parsed.id, parsed.publicModel, parsed.created, { role: 'assistant' }), { omitEventName: true })
       const result = await createCompletion(options.runtime, requestOptions, timeout.signal, (chunk) => {
         if (chunk.type === 'text-delta') {
-          writeSse(reply, 'message', chatCompletionChunk(parsed!.id, parsed!.publicModel, parsed!.created, { content: chunk.text }))
+          writeSse(reply, 'message', chatCompletionChunk(parsed!.id, parsed!.publicModel, parsed!.created, { content: chunk.text }), { omitEventName: true })
         } else if (chunk.type === 'reasoning-delta') {
-          writeSse(reply, 'message', chatCompletionChunk(parsed!.id, parsed!.publicModel, parsed!.created, { reasoning_content: chunk.text }))
+          writeSse(reply, 'message', chatCompletionChunk(parsed!.id, parsed!.publicModel, parsed!.created, { reasoning_content: chunk.text }), { omitEventName: true })
         } else if (chunk.type === 'tool-call-delta') {
           writeSse(reply, 'message', chatCompletionChunk(parsed!.id, parsed!.publicModel, parsed!.created, {
             tool_calls: [{
@@ -353,14 +358,14 @@ export function registerOpenAiRoutes(app: FastifyInstance, options: OpenAiRouteO
                 arguments: chunk.argumentsDelta,
               },
             }],
-          }))
+          }), { omitEventName: true })
         }
       })
       const streamOptions = asRecord(parsed.body.stream_options)
       if (streamOptions?.include_usage === true) {
         reply.raw.write(`data: ${completionUsageChunk(parsed.id, parsed.publicModel, parsed.created, result)}\n\n`)
       }
-      writeSse(reply, 'message', chatCompletionChunk(parsed.id, parsed.publicModel, parsed.created, {}, result.finishReason))
+      writeSse(reply, 'message', chatCompletionChunk(parsed.id, parsed.publicModel, parsed.created, {}, result.finishReason), { omitEventName: true })
       reply.raw.write('data: [DONE]\n\n')
       reply.raw.end()
       await persistCall(options, parsed, startedAt, 200, result, undefined, request.log)
@@ -373,7 +378,7 @@ export function registerOpenAiRoutes(app: FastifyInstance, options: OpenAiRouteO
               type: 'server_error',
               code: error instanceof OpenAiRequestError ? error.code : 'upstream_error',
             },
-          })
+          }, { omitEventName: true })
           reply.raw.write('data: [DONE]\n\n')
           reply.raw.end()
         }

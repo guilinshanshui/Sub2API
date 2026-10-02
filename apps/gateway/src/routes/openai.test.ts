@@ -148,6 +148,8 @@ describe('OpenAI routes', () => {
     expect(chat.body).toContain('data: {"id":"chatcmpl-')
     expect(chat.body).toContain('"content":"hello"')
     expect(chat.body).toContain('data: [DONE]')
+    expect(chat.body).toContain(': heartbeat')
+    expect(chat.body).not.toContain('event: message')
 
     const responses = await app.inject({
       method: 'POST',
