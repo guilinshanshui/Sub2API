@@ -28,6 +28,19 @@ export interface PublicModel {
   name: string
   description?: string
   aliases: string[]
+  contextWindow?: number
+  maxTokens?: number
+  inputModalities?: readonly string[]
+  reasoningEfforts?: readonly PublicReasoningEffort[]
+  defaultReasoningEffort?: string
+  /** True when the level is a Codex compatibility placeholder and must not be sent upstream. */
+  syntheticReasoning?: boolean
+}
+
+export interface PublicReasoningEffort {
+  id: string
+  name: string
+  description?: string
 }
 
 export interface CompletionToolCall {
@@ -58,6 +71,7 @@ export interface CompletionRequest {
   temperature?: number
   maxTokens?: number
   stop?: string[]
+  reasoningEffort?: string
 }
 
 export interface ImageInputWriter {
@@ -318,9 +332,107 @@ function publicModelId(provider: string, modelId: string): string {
   return `${provider}/${modelId}`
 }
 
+const REASONING_EFFORT_DESCRIPTIONS: Record<string, string> = {
+  none: 'Disables reasoning for the fastest responses',
+  minimal: 'Minimal reasoning for the fastest responses',
+  low: 'Fast responses with lighter reasoning',
+  medium: 'Balances speed and reasoning depth for everyday tasks',
+  high: 'Greater reasoning depth for complex problems',
+  xhigh: 'Extra high reasoning depth for complex problems',
+  max: 'Maximum reasoning depth for the hardest problems',
+}
+
+function reasoningEffortLabel(id: string): string {
+  if (id.length === 0) return id
+  return id.slice(0, 1).toUpperCase() + id.slice(1)
+}
+
+/** Pick the closest effort the model actually accepts instead of failing the turn. */
+export function pickReasoningEffort(model: PublicModel, requested: unknown): string | undefined {
+  const efforts = model.reasoningEfforts ?? []
+  if (efforts.length === 0) return undefined
+  const wanted = typeof requested === 'string' ? requested.trim() : ''
+  if (wanted.length > 0 && efforts.some((effort) => effort.id === wanted)) return wanted
+  const fallback = model.defaultReasoningEffort
+  if (fallback !== undefined && efforts.some((effort) => effort.id === fallback)) return fallback
+  return efforts[0]?.id
+}
+
+/** Resolve adapter-owned context, output cap, modalities, and effort metadata in parallel. */
+async function enrichModelCapabilities(runtime: GatewayRuntime, models: PublicModel[]): Promise<void> {
+  if (typeof runtime.llm.resolveModelInfo !== 'function') return
+  const queue = [...models]
+  const workers = Array.from({ length: Math.min(8, queue.length) }, async () => {
+    for (;;) {
+      const model = queue.shift()
+      if (model === undefined) return
+      try {
+        const info = await runtime.llm.resolveModelInfo(model.provider, model.upstreamId)
+        if (info.context?.contextWindow !== undefined) model.contextWindow = info.context.contextWindow
+        if (info.defaultMaxTokens !== undefined) model.maxTokens = info.defaultMaxTokens
+        if (info.inputModalities !== undefined) model.inputModalities = info.inputModalities
+        const declared = info.reasoning
+        const efforts = declared?.efforts ?? []
+        if (efforts.length > 0) {
+          model.reasoningEfforts = efforts.map((effort) => ({
+            id: String(effort.id),
+            name: effort.name,
+            ...effort.description !== undefined ? { description: effort.description } : {},
+          }))
+          if (declared?.defaultEffort !== undefined) model.defaultReasoningEffort = String(declared.defaultEffort)
+        } else if (declared?.defaultEffort !== undefined) {
+          const id = String(declared.defaultEffort)
+          model.reasoningEfforts = [{
+            id,
+            name: reasoningEffortLabel(id),
+            description: REASONING_EFFORT_DESCRIPTIONS[id],
+          }]
+          model.defaultReasoningEffort = id
+        }
+        if (model.reasoningEfforts === undefined || model.reasoningEfforts.length === 0) {
+          model.reasoningEfforts = [{
+            id: 'medium',
+            name: 'Default',
+            description: 'Uses the provider default reasoning behavior',
+          }]
+          model.defaultReasoningEffort = 'medium'
+          model.syntheticReasoning = true
+        }
+      } catch {
+        // Capability enrichment is best effort; listing must still succeed.
+      }
+    }
+  })
+  await Promise.all(workers)
+}
+
 function matchesAllowed(modelId: string, settings: GatewaySettings): boolean {
   if (settings.allowedModels.length === 0) return true
   return settings.allowedModels.some((pattern) => wildcardMatch(pattern, modelId))
+}
+
+/**
+ * Older Codex / CC Switch model catalogs were generated against the original
+ * WorkBuddy gateway, which addressed its two upstreams as `cn:<model>` and
+ * `global:<model>`. sub2api names the same providers buddy/workbuddy, so map
+ * the legacy namespace onto them instead of rejecting the request outright.
+ */
+const LEGACY_MODEL_NAMESPACES: Record<string, string> = {
+  cn: 'buddy',
+  global: 'workbuddy',
+}
+
+const LEGACY_NAMESPACE_BY_PROVIDER: Record<string, string> = Object.fromEntries(
+  Object.entries(LEGACY_MODEL_NAMESPACES).map(([namespace, provider]) => [provider, namespace]),
+)
+
+function splitLegacyModelId(model: string): { provider: string; upstreamId: string } | undefined {
+  const colon = model.indexOf(':')
+  if (colon <= 0) return undefined
+  const provider = LEGACY_MODEL_NAMESPACES[model.slice(0, colon).toLowerCase()]
+  const upstreamId = model.slice(colon + 1)
+  if (provider === undefined || upstreamId.length === 0) return undefined
+  return { provider, upstreamId }
 }
 
 export class ModelCatalog {
@@ -349,12 +461,22 @@ export class ModelCatalog {
     const exact = state.byId.get(model)
     if (exact !== undefined) return exact
 
+    const legacy = splitLegacyModelId(model)
+    if (legacy !== undefined && this.isKnownProvider(legacy.provider, state)) {
+      return {
+        id: publicModelId(legacy.provider, legacy.upstreamId),
+        provider: legacy.provider,
+        upstreamId: legacy.upstreamId,
+        name: legacy.upstreamId,
+        aliases: [],
+      }
+    }
+
     const slash = model.indexOf('/')
     if (slash > 0) {
       const provider = model.slice(0, slash)
       const upstreamId = model.slice(slash + 1)
-      const knownProvider = state.models.some((item) => item.provider === provider)
-      if (knownProvider || this.runtime.llm.listProviders().some((item) => item.id === provider)) {
+      if (this.isKnownProvider(provider, state)) {
         return {
           id: publicModelId(provider, upstreamId),
           provider,
@@ -386,6 +508,11 @@ export class ModelCatalog {
     throw new OpenAiRequestError(`Unknown model: ${model}`, 404, 'model_not_found')
   }
 
+  private isKnownProvider(provider: string, state: CatalogState): boolean {
+    return state.models.some((item) => item.provider === provider)
+      || this.runtime.llm.listProviders().some((item) => item.id === provider)
+  }
+
   private async ensure(force: boolean): Promise<CatalogState> {
     if (!force && this.state !== undefined && Date.now() - this.state.loadedAt < 30_000) return this.state
     const models: PublicModel[] = []
@@ -404,9 +531,11 @@ export class ModelCatalog {
           name: entry.name,
           description: entry.description,
           aliases: [],
+          inputModalities: entry.inputModalities,
         })
       }
     }
+    await enrichModelCapabilities(this.runtime, models)
     const byId = new Map(models.map((model) => [model.id, model]))
     const byBareId = new Map<string, PublicModel[]>()
     for (const model of models) {
@@ -420,6 +549,13 @@ export class ModelCatalog {
         model.aliases = [...model.aliases, bare]
         byId.set(bare, model)
       }
+    }
+    for (const model of models) {
+      const namespace = LEGACY_NAMESPACE_BY_PROVIDER[model.provider]
+      if (namespace === undefined) continue
+      const alias = `${namespace}:${model.upstreamId}`
+      model.aliases = [...model.aliases, alias]
+      byId.set(alias, model)
     }
     this.state = { loadedAt: Date.now(), models, byId, byBareId }
     return this.state
@@ -435,6 +571,7 @@ export async function createCompletion(
   const config: LlmCallConfig = {
     provider: request.provider,
     model: request.model,
+    ...request.reasoningEffort !== undefined ? { reasoningEffort: request.reasoningEffort as never } : {},
     temperature: request.temperature,
     maxTokens: request.maxTokens,
     stop: request.stop,
@@ -580,7 +717,7 @@ export function completionUsageChunk(
   })
 }
 
-function responseOutput(result: CompletionResult): Array<Record<string, unknown>> {
+export function responseOutput(result: CompletionResult): Array<Record<string, unknown>> {
   const output: Array<Record<string, unknown>> = []
   if (result.text.length > 0 || result.toolCalls.length === 0) {
     output.push({
@@ -609,6 +746,7 @@ export function responsesResponse(
   model: string,
   result: CompletionResult,
   createdAt: number,
+  output?: Array<Record<string, unknown>>,
 ): Record<string, unknown> {
   return {
     id,
@@ -616,7 +754,7 @@ export function responsesResponse(
     created_at: createdAt,
     status: 'completed',
     model,
-    output: responseOutput(result),
+    output: output ?? responseOutput(result),
     output_text: result.text,
     usage: {
       input_tokens: result.usage.inputTokens,

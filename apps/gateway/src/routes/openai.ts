@@ -15,6 +15,7 @@ import {
   parseResponsesInput,
   parseToolChoice,
   responseCreated,
+  pickReasoningEffort,
   responsesResponse,
   sse,
 } from '../openai.js'
@@ -22,6 +23,36 @@ import type { GatewayRuntime } from '../runtime.js'
 import type { GatewayStorage } from '../storage.js'
 import type { ApiKeyRecord } from '../types.js'
 import { asRecord, asString } from '../utils.js'
+
+function requestedReasoningEffort(model: PublicModel, body: Record<string, unknown>): string | undefined {
+  if (model.syntheticReasoning === true) return undefined
+  return pickReasoningEffort(model, body.reasoning_effort ?? asRecord(body.reasoning)?.effort)
+}
+
+function publicModelPayload(model: PublicModel): Record<string, unknown> {
+  const reasoningLevels = (model.reasoningEfforts ?? []).map((effort) => ({
+    effort: effort.id,
+    description: effort.description ?? effort.name,
+  }))
+  return {
+    id: model.id,
+    object: 'model',
+    created: 0,
+    owned_by: model.provider,
+    permission: [],
+    root: model.id,
+    parent: null,
+    name: model.name,
+    description: model.description,
+    context_window: model.contextWindow,
+    max_context_window: model.contextWindow,
+    max_output_tokens: model.maxTokens,
+    input_modalities: model.inputModalities,
+    supported_reasoning_levels: reasoningLevels,
+    ...model.defaultReasoningEffort !== undefined ? { default_reasoning_level: model.defaultReasoningEffort } : {},
+    supports_reasoning_summaries: reasoningLevels.length > 0,
+  }
+}
 
 interface OpenAiRouteOptions {
   apiKeys: ApiKeyManager
@@ -262,16 +293,7 @@ export function registerOpenAiRoutes(app: FastifyInstance, options: OpenAiRouteO
           .filter((model) => options.apiKeys.allowsModel(apiKey, model.id)
             || options.apiKeys.allowsModel(apiKey, model.upstreamId)
             || model.aliases.some((alias) => options.apiKeys.allowsModel(apiKey, alias)))
-          .map((model) => ({
-            id: model.id,
-            object: 'model',
-            created: 0,
-            owned_by: model.provider,
-            permission: [],
-            root: model.id,
-            parent: null,
-            name: model.name,
-          })),
+          .map(publicModelPayload),
       }
     } catch (error) {
       return openAiError(reply, error)
@@ -292,6 +314,7 @@ export function registerOpenAiRoutes(app: FastifyInstance, options: OpenAiRouteO
         provider: parsed.model.provider,
         model: parsed.model.upstreamId,
         publicModel: parsed.model.id,
+        reasoningEffort: requestedReasoningEffort(parsed.model, parsed.body),
         messages: [],
         system: undefined,
         tools: chat.tools,
@@ -393,6 +416,12 @@ export function registerOpenAiRoutes(app: FastifyInstance, options: OpenAiRouteO
         provider: parsed.model.provider,
         model: parsed.model.upstreamId,
       }, options.runtime.attachments)
+      const instructions = asString(parsed.body.instructions)
+      if (instructions !== undefined && instructions.trim().length > 0) {
+        responseInput.system = responseInput.system !== undefined && responseInput.system.length > 0
+          ? `${instructions}\n\n${responseInput.system}`
+          : instructions
+      }
       const settings = options.storage.getSettings()
       timeout = createTimeoutSignal(request, reply, settings.requestTimeoutMs)
       const tools = Array.isArray(parsed.body.tools)
@@ -411,6 +440,7 @@ export function registerOpenAiRoutes(app: FastifyInstance, options: OpenAiRouteO
         provider: parsed.model.provider,
         model: parsed.model.upstreamId,
         publicModel: parsed.model.id,
+        reasoningEffort: requestedReasoningEffort(parsed.model, parsed.body),
         messages: responseInput.messages,
         system: responseInput.system,
         tools,
@@ -426,40 +456,249 @@ export function registerOpenAiRoutes(app: FastifyInstance, options: OpenAiRouteO
       }
 
       startSse(reply)
-      writeSse(reply, 'response.created', {
+      let sequence = 0
+      const send = (event: string, data: Record<string, unknown>): void => {
+        writeSse(reply, event, { ...data, sequence_number: sequence })
+        sequence += 1
+      }
+
+      let outputIndex = 0
+      let messageItem: { id: string; index: number } | undefined
+      let reasoningItem: { id: string; index: number; text: string } | undefined
+      const functionItems = new Map<number, { id: string; index: number; callId: string; name: string }>()
+
+      send('response.created', {
         type: 'response.created',
         response: responseCreated(responseId, parsed.publicModel, parsed.created),
       })
-      let outputIndex = 0
+      send('response.in_progress', {
+        type: 'response.in_progress',
+        response: {
+          ...responseCreated(responseId, parsed.publicModel, parsed.created),
+          status: 'in_progress',
+        },
+      })
+
       const result = await createCompletion(options.runtime, requestOptions, timeout.signal, (chunk) => {
         if (chunk.type === 'text-delta') {
-          writeSse(reply, 'response.output_text.delta', {
+          if (messageItem === undefined) {
+            messageItem = { id: `msg_${responseId}`, index: outputIndex }
+            outputIndex += 1
+            send('response.output_item.added', {
+              type: 'response.output_item.added',
+              output_index: messageItem.index,
+              item: {
+                id: messageItem.id,
+                type: 'message',
+                status: 'in_progress',
+                role: 'assistant',
+                content: [],
+              },
+            })
+            send('response.content_part.added', {
+              type: 'response.content_part.added',
+              item_id: messageItem.id,
+              output_index: messageItem.index,
+              content_index: 0,
+              part: { type: 'output_text', text: '', annotations: [] },
+            })
+          }
+          send('response.output_text.delta', {
             type: 'response.output_text.delta',
-            item_id: `msg_${responseId}`,
-            output_index: outputIndex,
+            item_id: messageItem.id,
+            output_index: messageItem.index,
             content_index: 0,
             delta: chunk.text,
           })
         } else if (chunk.type === 'reasoning-delta') {
-          writeSse(reply, 'response.reasoning_text.delta', {
-            type: 'response.reasoning_text.delta',
-            item_id: `rs_${responseId}`,
-            output_index: outputIndex,
-            content_index: 0,
+          if (reasoningItem === undefined) {
+            reasoningItem = { id: `rs_${responseId}`, index: outputIndex, text: '' }
+            outputIndex += 1
+            send('response.output_item.added', {
+              type: 'response.output_item.added',
+              output_index: reasoningItem.index,
+              item: { id: reasoningItem.id, type: 'reasoning', summary: [] },
+            })
+          }
+          reasoningItem.text += chunk.text
+          send('response.reasoning_summary_text.delta', {
+            type: 'response.reasoning_summary_text.delta',
+            item_id: reasoningItem.id,
+            output_index: reasoningItem.index,
+            summary_index: 0,
             delta: chunk.text,
           })
         } else if (chunk.type === 'tool-call-delta') {
-          writeSse(reply, 'response.function_call_arguments.delta', {
+          let item = functionItems.get(chunk.index)
+          if (item === undefined) {
+            item = {
+              id: `fc_${chunk.id}`,
+              index: outputIndex,
+              callId: chunk.id,
+              name: chunk.name ?? '',
+            }
+            outputIndex += 1
+            functionItems.set(chunk.index, item)
+            send('response.output_item.added', {
+              type: 'response.output_item.added',
+              output_index: item.index,
+              item: {
+                id: item.id,
+                type: 'function_call',
+                status: 'in_progress',
+                call_id: item.callId,
+                name: item.name,
+                arguments: '',
+              },
+            })
+          }
+          if (chunk.name !== undefined && chunk.name.length > 0) item.name = chunk.name
+          send('response.function_call_arguments.delta', {
             type: 'response.function_call_arguments.delta',
-            item_id: `fc_${chunk.id}`,
-            output_index: outputIndex,
+            item_id: item.id,
+            output_index: item.index,
             delta: chunk.argumentsDelta,
           })
         }
       })
-      writeSse(reply, 'response.completed', {
+
+      // Codex binds streamed deltas to items through matching ids, so close out
+      // every item that was opened and mirror those ids in the final response.
+      const output: Array<Record<string, unknown>> = []
+      if (messageItem === undefined && result.text.length > 0) {
+        messageItem = { id: `msg_${responseId}`, index: outputIndex }
+        outputIndex += 1
+        send('response.output_item.added', {
+          type: 'response.output_item.added',
+          output_index: messageItem.index,
+          item: {
+            id: messageItem.id,
+            type: 'message',
+            status: 'in_progress',
+            role: 'assistant',
+            content: [],
+          },
+        })
+        send('response.content_part.added', {
+          type: 'response.content_part.added',
+          item_id: messageItem.id,
+          output_index: messageItem.index,
+          content_index: 0,
+          part: { type: 'output_text', text: '', annotations: [] },
+        })
+      }
+      if (reasoningItem !== undefined) {
+        send('response.reasoning_summary_text.done', {
+          type: 'response.reasoning_summary_text.done',
+          item_id: reasoningItem.id,
+          output_index: reasoningItem.index,
+          summary_index: 0,
+          text: reasoningItem.text,
+        })
+        send('response.output_item.done', {
+          type: 'response.output_item.done',
+          output_index: reasoningItem.index,
+          item: {
+            id: reasoningItem.id,
+            type: 'reasoning',
+            summary: [{ type: 'summary_text', text: reasoningItem.text }],
+          },
+        })
+      }
+      if (messageItem !== undefined) {
+        const part = { type: 'output_text', text: result.text, annotations: [] }
+        send('response.output_text.done', {
+          type: 'response.output_text.done',
+          item_id: messageItem.id,
+          output_index: messageItem.index,
+          content_index: 0,
+          text: result.text,
+        })
+        send('response.content_part.done', {
+          type: 'response.content_part.done',
+          item_id: messageItem.id,
+          output_index: messageItem.index,
+          content_index: 0,
+          part,
+        })
+        const item = {
+          id: messageItem.id,
+          type: 'message',
+          status: 'completed',
+          role: 'assistant',
+          content: [part],
+        }
+        send('response.output_item.done', {
+          type: 'response.output_item.done',
+          output_index: messageItem.index,
+          item,
+        })
+        output.push(item)
+      } else if (result.text.length === 0 && result.toolCalls.length === 0) {
+        const part = { type: 'output_text', text: '', annotations: [] }
+        const item = {
+          id: `msg_${responseId}`,
+          type: 'message',
+          status: 'completed',
+          role: 'assistant',
+          content: [part],
+        }
+        send('response.output_item.added', {
+          type: 'response.output_item.added',
+          output_index: outputIndex,
+          item: { ...item, status: 'in_progress', content: [] },
+        })
+        send('response.output_item.done', {
+          type: 'response.output_item.done',
+          output_index: outputIndex,
+          item,
+        })
+        outputIndex += 1
+        output.push(item)
+      }
+      for (const call of result.toolCalls) {
+        const streamed = [...functionItems.values()].find((item) => item.callId === call.id)
+        const id = streamed?.id ?? `fc_${call.id}`
+        const index = streamed?.index ?? outputIndex++
+        if (streamed === undefined) {
+          send('response.output_item.added', {
+            type: 'response.output_item.added',
+            output_index: index,
+            item: {
+              id,
+              type: 'function_call',
+              status: 'in_progress',
+              call_id: call.id,
+              name: call.name,
+              arguments: '',
+            },
+          })
+        }
+        send('response.function_call_arguments.done', {
+          type: 'response.function_call_arguments.done',
+          item_id: id,
+          output_index: index,
+          arguments: call.arguments,
+        })
+        const item = {
+          id,
+          type: 'function_call',
+          status: 'completed',
+          call_id: call.id,
+          name: call.name,
+          arguments: call.arguments,
+        }
+        send('response.output_item.done', {
+          type: 'response.output_item.done',
+          output_index: index,
+          item,
+        })
+        output.push(item)
+      }
+
+      send('response.completed', {
         type: 'response.completed',
-        response: responsesResponse(responseId, parsed.publicModel, result, parsed.created),
+        response: responsesResponse(responseId, parsed.publicModel, result, parsed.created, output),
       })
       reply.raw.end()
       await persistCall(options, parsed, startedAt, 200, result, undefined, request.log)

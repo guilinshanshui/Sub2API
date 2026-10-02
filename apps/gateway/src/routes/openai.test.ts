@@ -13,6 +13,13 @@ import { registerOpenAiRoutes } from './openai.js'
 interface Fixture {
   app: FastifyInstance
   storage: GatewayStorage
+  runtime: FixtureRuntime
+}
+
+interface FixtureRuntime {
+  llm: {
+    prepareCall: ReturnType<typeof vi.fn>
+  }
 }
 
 const fixtures: Fixture[] = []
@@ -46,6 +53,18 @@ async function createFixture(): Promise<Fixture> {
     llm: {
       listProviders: () => [{ id: 'provider-a', name: 'Provider A' }],
       listModels: vi.fn(async () => [{ id: 'shared', name: 'Shared' }]),
+      resolveModelInfo: vi.fn(async () => ({
+        provider: 'provider-a',
+        id: 'shared',
+        name: 'Shared',
+        context: { contextWindow: 200_000 },
+        defaultMaxTokens: 64_000,
+        inputModalities: ['text', 'image'],
+        reasoning: {
+          efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }],
+          defaultEffort: 'high',
+        },
+      })),
       prepareCall: vi.fn(async () => ({
         config: {},
         stream: async function* () {
@@ -69,7 +88,7 @@ async function createFixture(): Promise<Fixture> {
     storage,
   })
   await app.ready()
-  const fixture = { app, storage }
+  const fixture = { app, storage, runtime: runtime as unknown as FixtureRuntime }
   fixtures.push(fixture)
   return fixture
 }
@@ -95,6 +114,9 @@ describe('OpenAI routes', () => {
     })
     expect(models.statusCode).toBe(200)
     expect(models.json().data[0].id).toBe('provider-a/shared')
+    expect(models.json().data[0].context_window).toBe(200_000)
+    expect(models.json().data[0].supported_reasoning_levels.map((item: { effort: string }) => item.effort)).toEqual(['low', 'high'])
+    expect(models.json().data[0].default_reasoning_level).toBe('high')
 
     const response = await app.inject({
       method: 'POST',
@@ -141,6 +163,67 @@ describe('OpenAI routes', () => {
     expect(responses.body).toContain('event: response.created')
     expect(responses.body).toContain('event: response.output_text.delta')
     expect(responses.body).toContain('event: response.completed')
+    expect(responses.body).toContain('event: response.in_progress')
+    expect(responses.body).toContain('event: response.output_item.added')
+    expect(responses.body).toContain('event: response.output_text.done')
+    expect(responses.body).toContain('event: response.content_part.done')
+    expect(responses.body).toContain('event: response.output_item.done')
+    expect(responses.body).toContain('"sequence_number":0')
+  })
+
+  it('merges top-level instructions into the system prompt', async () => {
+    const { app, runtime } = await createFixture()
+    let captured: { system?: string } | undefined
+    runtime.llm.prepareCall = vi.fn(async () => ({
+      config: {},
+      stream: async function* (options: { system?: string }) {
+        captured = options
+        yield { type: 'text-delta', text: 'ok' }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      },
+    }))
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/responses',
+      headers: { authorization: 'Bearer sk-test' },
+      payload: {
+        model: 'provider-a/shared',
+        input: 'Hi',
+        instructions: 'You are a helpful coding agent.',
+      },
+    })
+    expect(response.statusCode).toBe(200)
+    expect(captured?.system).toBe('You are a helpful coding agent.')
+  })
+
+  it('streams function call items for the Responses API', async () => {
+    const { app, runtime } = await createFixture()
+    runtime.llm.prepareCall = vi.fn(async () => ({
+      config: {},
+      stream: async function* () {
+        yield { type: 'tool-call-delta', index: 0, id: 'call_1', name: 'shell', argumentsDelta: '{"cmd":' }
+        yield { type: 'tool-call-delta', index: 0, id: 'call_1', argumentsDelta: '"ls"}' }
+        yield { type: 'finish', reason: { kind: 'tool-calls' } }
+      },
+    }))
+
+    const responses = await app.inject({
+      method: 'POST',
+      url: '/v1/responses',
+      headers: { authorization: 'Bearer sk-test' },
+      payload: {
+        model: 'provider-a/shared',
+        stream: true,
+        input: 'list files',
+      },
+    })
+    expect(responses.statusCode).toBe(200)
+    expect(responses.body).toContain('"type":"function_call"')
+    expect(responses.body).toContain('event: response.function_call_arguments.delta')
+    expect(responses.body).toContain('event: response.function_call_arguments.done')
+    expect(responses.body).toContain('"call_id":"call_1"')
+    expect(responses.body).toContain('"name":"shell"')
   })
 
   it('does not fail a successful response when audit persistence fails', async () => {
@@ -160,6 +243,24 @@ describe('OpenAI routes', () => {
 
     expect(response.statusCode).toBe(200)
     expect(response.json().choices[0].message.content).toBe('hello')
+  })
+
+  it('passes the selected reasoning effort to the adapter', async () => {
+    const { app, runtime } = await createFixture()
+    await app.inject({
+      method: 'POST',
+      url: '/v1/responses',
+      headers: { authorization: 'Bearer sk-test' },
+      payload: {
+        model: 'provider-a/shared',
+        input: 'Hi',
+        reasoning: { effort: 'low' },
+      },
+    })
+    expect(runtime.llm.prepareCall).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: 'provider-a', model: 'shared', reasoningEffort: 'low' }),
+      expect.anything(),
+    )
   })
 
   it('rejects unauthenticated requests', async () => {

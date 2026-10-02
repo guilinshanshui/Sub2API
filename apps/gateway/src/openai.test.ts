@@ -10,6 +10,7 @@ import {
   OpenAiRequestError,
   parseMessagesForOpenAi,
   parseResponsesInput,
+  pickReasoningEffort,
 } from './openai.js'
 import type { GatewayRuntime } from './runtime.js'
 import type { GatewaySettings } from './types.js'
@@ -75,6 +76,83 @@ describe('ModelCatalog', () => {
       provider: 'provider-a',
       upstreamId: 'new-model',
     })
+  })
+
+  it('maps legacy cn: / global: namespaces onto the buddy and workbuddy providers', async () => {
+    const runtime = {
+      llm: {
+        listProviders: () => [
+          { id: 'buddy', name: 'CodeBuddy' },
+          { id: 'workbuddy', name: 'WorkBuddy' },
+        ],
+        listModels: vi.fn(async (provider: string) => provider === 'buddy'
+          ? [{ id: 'deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash' }]
+          : [{ id: 'gpt-5.5', name: 'GPT-5.5' }]),
+      },
+      accountPool: { disabledModelsFor: () => new Set<string>() },
+    } as unknown as GatewayRuntime
+    const catalog = new ModelCatalog(runtime)
+
+    const domestic = await catalog.resolve('cn:deepseek-v4.1-flash', settings)
+    expect(domestic).toMatchObject({
+      id: 'buddy/deepseek-v4.1-flash',
+      provider: 'buddy',
+      upstreamId: 'deepseek-v4.1-flash',
+    })
+    expect(domestic.aliases).toContain('cn:deepseek-v4.1-flash')
+
+    const oversea = await catalog.resolve('global:gpt-5.5', settings)
+    expect(oversea).toMatchObject({
+      id: 'workbuddy/gpt-5.5',
+      provider: 'workbuddy',
+      upstreamId: 'gpt-5.5',
+    })
+    expect(oversea.aliases).toContain('global:gpt-5.5')
+
+    expect((await catalog.list(settings)).map((model) => model.id)).toEqual([
+      'buddy/deepseek-v4.1-flash',
+      'workbuddy/gpt-5.5',
+    ])
+  })
+
+  it('enriches capabilities and gives undeclared models a usable default level', async () => {
+    const runtime = {
+      llm: {
+        listProviders: () => [{ id: 'provider-a', name: 'Provider A' }],
+        listModels: vi.fn(async () => [
+          { id: 'reasoner', name: 'Reasoner' },
+          { id: 'plain', name: 'Plain' },
+        ]),
+        resolveModelInfo: vi.fn(async (_provider: string, model: string) => model === 'reasoner'
+          ? {
+              provider: 'provider-a', id: 'reasoner', name: 'Reasoner',
+              context: { contextWindow: 200_000 }, defaultMaxTokens: 64_000,
+              inputModalities: ['text'],
+              reasoning: {
+                efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }],
+                defaultEffort: 'high',
+              },
+            }
+          : { provider: 'provider-a', id: 'plain', name: 'Plain', context: { contextWindow: 128_000 } }),
+      },
+      accountPool: { disabledModelsFor: () => new Set<string>() },
+    } as unknown as GatewayRuntime
+    const catalog = new ModelCatalog(runtime)
+    const models = await catalog.list(settings)
+    const reasoner = models.find((model) => model.upstreamId === 'reasoner')
+    expect(reasoner).toMatchObject({ contextWindow: 200_000, maxTokens: 64_000, defaultReasoningEffort: 'high' })
+    expect(reasoner?.reasoningEfforts?.map((effort) => effort.id)).toEqual(['low', 'high'])
+    expect(pickReasoningEffort(reasoner!, 'low')).toBe('low')
+    expect(pickReasoningEffort(reasoner!, 'bogus')).toBe('high')
+    const plain = models.find((model) => model.upstreamId === 'plain')
+    expect(plain).toMatchObject({ syntheticReasoning: true, defaultReasoningEffort: 'medium' })
+    expect(pickReasoningEffort(plain!, 'high')).toBe('medium')
+  })
+
+  it('passes an unlisted legacy id through for a known provider but rejects unknown namespaces', async () => {
+    const catalog = new ModelCatalog(catalogRuntime())
+    await expect(catalog.resolve('cn:deepseek-v4.1-flash', settings)).rejects.toThrow('Unknown model')
+    await expect(catalog.resolve('nope:deepseek-v4.1-flash', settings)).rejects.toThrow('Unknown model')
   })
 })
 

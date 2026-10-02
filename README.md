@@ -185,6 +185,23 @@ curl http://127.0.0.1:8787/v1/responses \
 流式请求使用 `"stream": true`。网关会返回标准 SSE，并在结束后发送 `[DONE]`
 或对应的完成事件。
 
+### Codex / Codex++ 模型能力
+
+`/v1/models` 会携带 Codex 需要的能力元数据：`context_window`、
+`max_output_tokens`、`input_modalities`、`supported_reasoning_levels` 和
+`default_reasoning_level`。Codex++ 的模型选择器读取的是本地
+`model_catalog_json`，若该目录是用旧版本生成的，思考等级会为空，模型便无法使用。
+
+重新生成后，可用脚本把网关能力同步进当前目录（会先自动备份）：
+
+```bash
+node scripts/sync-codex-catalog.mjs
+```
+
+脚本读取 `~/.codex/config.toml` 中的 `model_catalog_json`，也支持 `--catalog`、
+`--gateway`、`--key` 参数。未声明思考等级的模型会补一个 `Default`（`medium`）
+占位等级，仅供选择器使用，不会发往上游。同步后重启 Codex++ 即可生效。
+
 ## 数据、备份与升级
 
 所有持久化数据都在 `SUB2API_DATA_DIR`：
