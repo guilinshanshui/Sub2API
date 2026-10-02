@@ -307,8 +307,10 @@ export class PhanthyAdapter extends LlmAdapter {
       Accept: 'application/json, text/event-stream',
       Authorization: `Bearer ${credential?.access_token ?? ''}`,
       'Content-Type': 'application/json',
-      'User-Agent': 'phanthycode2api/1.0',
+      'User-Agent': PHANTHY.messagesUserAgent,
       'x-app': 'cli',
+      'x-phanthy-client-source': 'desktop',
+      'x-phanthy-client-version': PHANTHY.messagesClientVersion,
       'X-Claude-Code-Session-Id': session,
     })
 

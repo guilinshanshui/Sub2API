@@ -435,7 +435,7 @@ export class PhanthyAuth extends Service {
         headers: {
           Accept: 'application/json',
           'Content-Type': 'application/x-www-form-urlencoded',
-          'User-Agent': 'phanthycode2api/1.0',
+          'User-Agent': 'codex-cli/0.91.0',
           'anthropic-beta': PHANTHY_OAUTH_BETA,
         },
         body,

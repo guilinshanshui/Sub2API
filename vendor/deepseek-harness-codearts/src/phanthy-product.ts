@@ -17,7 +17,12 @@ export interface PhanthyProduct {
   id: 'phanthy'
   displayName: string
   apiBase: string
+  /** 桌面业务 API 的客户端标识与版本。 */
+  desktopUserAgent: string
   desktopVersion: string
+  /** Anthropic Messages API 客户端标识与版本。 */
+  messagesUserAgent: string
+  messagesClientVersion: string
   desktopPlatform: string
   defaultCredentialRef: string
   fallbackModels: readonly PhanthyFallbackModel[]
@@ -45,7 +50,10 @@ export const PHANTHY: PhanthyProduct = {
   id: 'phanthy',
   displayName: 'PhanthyCode',
   apiBase: PHANTHY_API_BASE,
-  desktopVersion: '2.33.2',
+  desktopUserAgent: 'phanthy-code-cli/2.34.0',
+  desktopVersion: '2.34.0',
+  messagesClientVersion: '2.1.92',
+  messagesUserAgent: 'claude-cli/2.1.92 (external, cli)',
   desktopPlatform: process.platform === 'win32' ? 'windows' : process.platform,
   defaultCredentialRef: 'PHANTHY_ACCESS_TOKEN',
   fallbackModels: PHANTHY_FALLBACK_MODELS,
