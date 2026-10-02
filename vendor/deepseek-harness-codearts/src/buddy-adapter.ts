@@ -56,6 +56,25 @@ export const CHAT_API_BASE = 'https://copilot.tencent.com/v2'
 function isDeepSeekModel(model: string): boolean {
   return /^deepseek/i.test(model.trim())
 }
+
+/**
+ * 生成每账号稳定且跨重启恒定的官方桌面端设备指纹。
+ *
+ * 与 workbuddy2api-panel 的账号级策略一致：设备/会话 ID 由 UID 派生，而不是
+ * 每次请求随机生成，避免上游看到同一账号的设备指纹漂移。
+ */
+async function deriveStableDeviceId(uid: string, purpose: 'machine' | 'session'): Promise<string> {
+  const data = new TextEncoder().encode(`wb2a:${purpose}:${uid}`)
+  const digest = await crypto.subtle.digest('SHA-256', data)
+  return Array.from(new Uint8Array(digest).slice(0, 18))
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('')
+}
+
+/** 生成官方客户端会话头使用的 32 位 hex ID（UUID 去横线）。 */
+function messageId(): string {
+  return crypto.randomUUID().replace(/-/g, '')
+}
 /**
  * CodeBuddy 的 provider 路由名（历史常量，保留导出以兼容既有导入方）。
  *
@@ -1570,7 +1589,7 @@ export class BuddyAdapter extends LlmAdapter {
     body: string,
     options: GenerateOptions,
   ): Promise<Response> {
-    const headers = new Headers(attributionHeaders())
+    const headers = new Headers()
     headers.set('Authorization', `Bearer ${credential.access_token}`)
     headers.set('Accept', 'text/event-stream')
     headers.set('Content-Type', 'application/json')
@@ -1584,9 +1603,33 @@ export class BuddyAdapter extends LlmAdapter {
     headers.set('X-IDE-Type', this.product.attributionName)
     headers.set('X-IDE-Version', this.product.clientVersion)
     headers.set(HTTP_HEADER_PRODUCT, this.product.attributionName)
+    // 官方客户端所有请求必带的风控闸门头；缺失会形成可识别的网关特征。
+    headers.set('X-CodeBuddy-Request', '1')
+    headers.set('Accept-Language', this.product.id === 'workbuddy' ? 'en-US' : 'zh-CN')
+    headers.set('Origin', this.product.endpoint)
+    headers.set('Referer', `${this.product.endpoint}/`)
+    headers.set('X-Requested-With', 'XMLHttpRequest')
+    // 设备指纹按账号派生；WorkBuddy 国际版声明为无企业账号。
+    if (credential.user_id) {
+      headers.set('X-Machine-ID', await deriveStableDeviceId(credential.user_id, 'machine'))
+      headers.set('X-Session-ID', await deriveStableDeviceId(credential.user_id, 'session'))
+    }
+    if (this.product.id === 'workbuddy') {
+      headers.set('X-No-Enterprise-Id', '1')
+    }
+    // 会话链路头：conversation request 对一次用户发送聚合，message/request 对
+    // 每次物理请求独立；B3 族采用合法长度，避免破坏上游追踪关联。
+    const conversationRequestId = messageId()
+    const currentMessageId = messageId()
+    headers.set('X-Conversation-Request-ID', conversationRequestId)
+    headers.set('X-Conversation-Message-ID', currentMessageId)
+    headers.set('X-Request-ID', currentMessageId)
+    headers.set('X-Root-Request-ID', conversationRequestId)
+    headers.set('X-Trace-ID', conversationRequestId)
+    headers.set('X-B3-TraceId', conversationRequestId)
+    headers.set('X-B3-SpanId', currentMessageId.slice(0, 16))
+    headers.set('X-B3-Sampled', '1')
     // User-Agent 按模型族分档：不同模型线归属不同客户端形态，后台据此分列。
-    // 必须用 set 覆盖（attributionHeaders() 注入的框架 UA 键为小写，
-    // 但 Headers 键大小写不敏感，set 能正常覆盖）。
     headers.set('User-Agent', resolveUserAgent(this.product, options.model))
     try {
       return await this.fetchImpl(`${this.product.endpoint}/v2/chat/completions`, {

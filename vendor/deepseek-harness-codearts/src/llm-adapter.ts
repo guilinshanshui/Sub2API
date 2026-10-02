@@ -1,7 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
 import {
-  attributionHeaders, CONTEXT_WINDOW_EXCEEDED_CODE, isContextWindowExceededError,
+  CONTEXT_WINDOW_EXCEEDED_CODE, isContextWindowExceededError,
   isQuotaExceededError, LlmAdapter, LlmError, QUOTA_EXCEEDED_CODE,
 } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, LlmModelInfo, LlmProviderInfo, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
@@ -969,7 +969,7 @@ export class CodeArtsAdapter extends LlmAdapter {
         new TextEncoder().encode(body),
         extraSignedHeaders,
       )
-      const headers = new Headers(attributionHeaders())
+      const headers = new Headers()
       // 签名 map 中的额外头（如 maas_type）必须随请求发送——它们已参与
       // canonical 计算、包含在 SignedHeaders 列表中，缺失会导致服务端验签失败。
       signed.forEach((value, key) => { if (key !== 'content-type') headers.set(key, value) })
@@ -977,6 +977,10 @@ export class CodeArtsAdapter extends LlmAdapter {
       headers.set('Chat-Id', this.chatId)
       headers.set('Session-Id', this.sessionId)
       headers.set('lang', 'en')
+      // 对齐官方 Agent 的 INFERHUB 请求形态；该路由头与 trace ID 均不参与
+      // SDK-HMAC-SHA256 签名，必须在 signed map 之后追加。
+      headers.set('Agent-Type', 'INFERHUB_AGENT')
+      headers.set('x-snap-traceid', crypto.randomUUID())
 
       response = await this.fetchImpl(url, {
         method: 'POST',
