@@ -11,7 +11,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
 import {
-  attributionHeaders,
   CONTEXT_WINDOW_EXCEEDED_CODE,
   isContextWindowExceededError,
   LlmAdapter, LlmError,
