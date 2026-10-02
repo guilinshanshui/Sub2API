@@ -179,6 +179,17 @@ export interface BuddyProduct {
  */
 const CODEBUDDY_FALLBACK_MODELS: readonly BuddyFallbackModel[] = [
   {
+    // 2026-10 新增：国内版 CodeBuddy 的匿名内测模型（官方描述「推理速度极快，
+    // 编码能力强劲，并支持原生多模态输入的匿名大模型」）。取值来自实测
+    // /v3/config 与 /v1/models：上下文 1M、输出上限 128000、支持图片输入，
+    // 档位 low/medium/high/xhigh/max，默认 max。
+    //
+    // ⚠️ 展示名刻意不含倍率 —— 见 buddy.ts 的 RATE_HIDDEN_MODEL_IDS。
+    id: 'space-bunny', name: 'Space-Bunny', contextWindow: 1_000_000, supportsImages: true,
+    reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultReasoningEffort: 'max',
+    maxOutputTokens: 128_000,
+  },
+  {
     id: 'hy4-preview', name: 'Hy4 preview', contextWindow: 1_000_000, supportsImages: true,
     reasoningEfforts: ['high'], defaultReasoningEffort: 'high', maxOutputTokens: 64_000,
   },

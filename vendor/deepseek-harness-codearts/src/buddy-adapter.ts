@@ -27,6 +27,7 @@ import {
   HTTP_HEADER_PRODUCT_CODE,
   credentialExpiresAtMs,
   formatCreditsRate,
+  RATE_HIDDEN_MODEL_IDS,
 } from './buddy.js'
 import type { BuddyCredential, BuddyRemoteModel } from './buddy.js'
 import { CODEBUDDY, resolveUserAgent, type BuddyFallbackModel, type BuddyProduct } from './product.js'
@@ -2178,7 +2179,10 @@ function displayNameFor(model: BuddyRemoteModel, all: readonly BuddyRemoteModel[
 function displaySuffix(model: BuddyRemoteModel, all: readonly BuddyRemoteModel[]): string {
   const parts: string[] = []
   // 倍率：有促销时用 `原价→促销价` 一眼看出折扣幅度。
-  const rate = formatCreditsRate(model.creditsRate, model.discountedCreditsRate)
+  // 例外：RATE_HIDDEN_MODEL_IDS 中的模型刻意不显示倍率（见该常量注释）。
+  const rate = RATE_HIDDEN_MODEL_IDS.has(model.id)
+    ? undefined
+    : formatCreditsRate(model.creditsRate, model.discountedCreditsRate)
   if (rate !== undefined) parts.push(rate)
   // 同名消歧：只在**确实撞车**时追加，避免影响其它模型。
   const variant = variantLabelFor(model, all)

@@ -409,12 +409,26 @@ const MODEL_DISPLAY_NAMES: Readonly<Record<string, string>> = {
   'kimi-k2.7': 'Kimi K2.7',
   'kimi-k2.6': 'Kimi K2.6',
   'minimax-m3': 'MiniMax M3',
+  'space-bunny': 'Space-Bunny',
 }
 
 /** 模型 ID → 人类可读显示名称；未知模型回退为 ID 本身。 */
 export function displayNameForModel(id: string): string {
   return MODEL_DISPLAY_NAMES[id] ?? id
 }
+
+/**
+ * **不显示计费倍率**的模型 id 集合。
+ *
+ * 上游 /v3/config 会给每个模型下发 credits（如 x0.03），适配器把它拼进
+ * 展示名（Space-Bunny · x0.03）方便用户比较价格。但 Space-Bunny 是匿名
+ * 内测模型：官方 IDE 与 wb2api 都只显示 Space-Bunny，倍率对用户没有参考
+ * 价值，故这里按产品要求隐藏。
+ *
+ * 只影响**展示名**，不触碰 creditsRate 字段本身 —— 计费元数据仍照常透出，
+ * 需要倍率的调用方（Jet Hub、面板）不受影响。
+ */
+export const RATE_HIDDEN_MODEL_IDS: ReadonlySet<string> = new Set(['space-bunny'])
 
 /** /v3/config 解析出的单个模型：id、展示名与远端声明的能力。 */
 export interface BuddyRemoteModel {
