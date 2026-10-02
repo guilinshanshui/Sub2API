@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import type { ImageAttachmentRef, ImageMediaType, SaveImageAttachment } from '@deepseek-ai/dsh-attachment'
 import type { GenerateOptions, LlmCallConfig, LlmModelInfo, Message, StreamChunk, ToolSchema } from '@deepseek-ai/dsh-llm'
 import {
   createAssistantMessage,
@@ -59,6 +60,10 @@ export interface CompletionRequest {
   stop?: string[]
 }
 
+export interface ImageInputWriter {
+  saveImage(input: SaveImageAttachment): Promise<ImageAttachmentRef>
+}
+
 interface CatalogState {
   loadedAt: number
   models: PublicModel[]
@@ -91,13 +96,126 @@ function asContentText(content: unknown): string {
         return asString(record?.text) ?? ''
       }
       if (type === 'image_url' || type === 'input_image' || type === 'image') {
-        throw new OpenAiRequestError('Image input is not supported by this gateway yet.', 400, 'unsupported_image_input')
+        throw new OpenAiRequestError('Image input is only supported in user messages.', 400, 'unsupported_image_input')
       }
       return ''
     }).join('')
   }
   if (content === null || content === undefined) return ''
   return String(content)
+}
+
+function normalizeImageMediaType(value: string | undefined): ImageMediaType | undefined {
+  const normalized = value?.toLowerCase().split(';', 1)[0]?.trim()
+  if (normalized === 'image/jpg') return 'image/jpeg'
+  if (normalized === 'image/png' || normalized === 'image/jpeg' || normalized === 'image/webp' || normalized === 'image/gif') {
+    return normalized
+  }
+  return undefined
+}
+
+function imageUrlFromPart(record: Record<string, unknown>): string | undefined {
+  const direct = asString(record.image_url)
+  if (direct !== undefined && direct.length > 0) return direct
+  return asString(asRecord(record.image_url)?.url)
+}
+
+function isPrivateHostname(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '')
+  if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local')) return true
+  if (host === '::1' || host.startsWith('fc') || host.startsWith('fd') || host.startsWith('fe80:')) return true
+  if (/^127\./.test(host) || /^10\./.test(host) || /^192\.168\./.test(host) || /^169\.254\./.test(host)) return true
+  const match = /^172\.(\d{1,3})\./.exec(host)
+  if (match !== null) {
+    const second = Number(match[1])
+    if (second >= 16 && second <= 31) return true
+  }
+  return false
+}
+
+async function imagePartFromOpenAi(
+  part: Record<string, unknown>,
+  writer: ImageInputWriter | undefined,
+): Promise<{ type: 'image'; attachment: ImageAttachmentRef }> {
+  if (writer === undefined) throw new OpenAiRequestError('Image input requires the attachment service.', 400, 'unsupported_image_input')
+  const url = imageUrlFromPart(part)
+  if (url === undefined || url.length === 0) throw new OpenAiRequestError('Image input requires image_url.', 400, 'invalid_image_input')
+
+  let data: Uint8Array
+  let mediaType: ImageMediaType | undefined
+  let name: string | undefined
+  const dataUrl = /^data:([^;,]+);base64,(.*)$/is.exec(url)
+  if (dataUrl !== null) {
+    mediaType = normalizeImageMediaType(dataUrl[1] ?? undefined)
+    if (mediaType === undefined) throw new OpenAiRequestError('Only PNG, JPEG, WebP, and GIF images are supported.', 400, 'unsupported_image_type')
+    // Buffer.from is lenient and would silently drop junk, so the payload is
+    // checked against the base64 alphabet before it is trusted.
+    const payload = (dataUrl[2] ?? '').replace(/\s+/g, '')
+    if (payload.length === 0 || payload.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(payload)) {
+      throw new OpenAiRequestError('Image data URL is not valid base64.', 400, 'invalid_image_input')
+    }
+    data = new Uint8Array(Buffer.from(payload, 'base64'))
+  } else {
+    let parsed: URL
+    try { parsed = new URL(url) } catch {
+      throw new OpenAiRequestError('Image URL is invalid.', 400, 'invalid_image_input')
+    }
+    if ((parsed.protocol !== 'http:' && parsed.protocol !== 'https:') || isPrivateHostname(parsed.hostname)) {
+      throw new OpenAiRequestError('Remote image URL must be a public http(s) address.', 400, 'invalid_image_input')
+    }
+    let response: Response
+    try {
+      response = await fetch(parsed, { redirect: 'manual', signal: AbortSignal.timeout(15_000) })
+    } catch (error) {
+      throw new OpenAiRequestError(`Failed to download image: ${error instanceof Error ? error.message : String(error)}`, 400, 'invalid_image_input')
+    }
+    if (!response.ok) throw new OpenAiRequestError(`Image download failed with HTTP ${response.status}.`, 400, 'invalid_image_input')
+    mediaType = normalizeImageMediaType(response.headers.get('content-type') ?? undefined)
+    if (mediaType === undefined) throw new OpenAiRequestError('Remote image has an unsupported content type.', 400, 'unsupported_image_type')
+    data = new Uint8Array(await response.arrayBuffer())
+    name = decodeURIComponent(parsed.pathname.split('/').pop() ?? '') || undefined
+  }
+
+  try {
+    const attachment = await writer.saveImage({
+      data,
+      mediaType,
+      ...name === undefined ? {} : { name },
+    })
+    return { type: 'image', attachment }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    throw new OpenAiRequestError(`Image input was rejected: ${message}`, 400, 'invalid_image_input')
+  }
+}
+
+async function contentBlocksFromOpenAi(
+  content: unknown,
+  writer: ImageInputWriter | undefined,
+): Promise<Array<{ type: 'text'; text: string } | { type: 'image'; attachment: ImageAttachmentRef }>> {
+  if (typeof content === 'string') return [{ type: 'text', text: content }]
+  if (!Array.isArray(content)) {
+    return [{ type: 'text', text: content === null || content === undefined ? '' : String(content) }]
+  }
+  const blocks: Array<{ type: 'text'; text: string } | { type: 'image'; attachment: ImageAttachmentRef }> = []
+  for (const part of content) {
+    if (typeof part === 'string') {
+      if (part.length > 0) blocks.push({ type: 'text', text: part })
+      continue
+    }
+    const record = asRecord(part)
+    if (record === undefined) continue
+    const type = asString(record.type)
+    if (type === 'text' || type === 'input_text' || type === 'output_text') {
+      const text = asString(record.text) ?? ''
+      if (text.length > 0) blocks.push({ type: 'text', text })
+      continue
+    }
+    if (type === 'image_url' || type === 'input_image' || type === 'image') {
+      blocks.push(await imagePartFromOpenAi(record, writer))
+    }
+  }
+  return blocks.length > 0 ? blocks : [{ type: 'text', text: '' }]
 }
 
 function toToolSchema(tool: unknown): ToolSchema {
@@ -123,10 +241,11 @@ function parseStop(value: unknown): string[] | undefined {
   return undefined
 }
 
-function messageFromOpenAi(
+async function messageFromOpenAi(
   raw: unknown,
   target: { provider: string; model: string },
-): { message?: Message; system?: string } {
+  imageWriter?: ImageInputWriter,
+): Promise<{ message?: Message; system?: string }> {
   const record = asRecord(raw)
   if (record === undefined) throw new OpenAiRequestError('Each message must be an object.', 400, 'invalid_message')
   const role = asString(record.role)
@@ -136,7 +255,7 @@ function messageFromOpenAi(
   if (role === 'user') {
     return {
       message: createUserMessage({
-        content: [{ type: 'text', text: asContentText(record.content) }],
+        content: await contentBlocksFromOpenAi(record.content, imageWriter),
         source: { kind: 'user' },
       }),
     }
@@ -176,15 +295,16 @@ function messageFromOpenAi(
   throw new OpenAiRequestError(`Unsupported message role: ${role ?? 'unknown'}`, 400, 'invalid_message')
 }
 
-export function parseMessagesForOpenAi(
+export async function parseMessagesForOpenAi(
   messages: unknown,
   target: { provider: string; model: string },
-): { messages: Message[]; system?: string } {
+  imageWriter?: ImageInputWriter,
+): Promise<{ messages: Message[]; system?: string }> {
   if (!Array.isArray(messages)) throw new OpenAiRequestError('messages must be an array.', 400, 'invalid_messages')
   const result: Message[] = []
   const systems: string[] = []
   for (const raw of messages) {
-    const parsed = messageFromOpenAi(raw, target)
+    const parsed = await messageFromOpenAi(raw, target, imageWriter)
     if (parsed.message !== undefined) result.push(parsed.message)
     if (parsed.system !== undefined && parsed.system.length > 0) systems.push(parsed.system)
   }
@@ -531,7 +651,11 @@ export function parseToolChoice(value: unknown): void {
   throw new OpenAiRequestError('Unsupported tool_choice value.', 400, 'unsupported_tool_choice')
 }
 
-export function parseResponsesInput(input: unknown, target: { provider: string; model: string }): { messages: Message[]; system?: string } {
+export async function parseResponsesInput(
+  input: unknown,
+  target: { provider: string; model: string },
+  imageWriter?: ImageInputWriter,
+): Promise<{ messages: Message[]; system?: string }> {
   if (typeof input === 'string') {
     return {
       messages: [createUserMessage({ content: [{ type: 'text', text: input }], source: { kind: 'user' } })],
@@ -544,6 +668,13 @@ export function parseResponsesInput(input: unknown, target: { provider: string; 
     const record = asRecord(item)
     if (record === undefined) continue
     const type = asString(record.type)
+    if (type === 'image_url' || type === 'input_image' || type === 'image') {
+      messages.push(createUserMessage({
+        content: await contentBlocksFromOpenAi([record], imageWriter),
+        source: { kind: 'user' },
+      }))
+      continue
+    }
     if (type === 'function_call') {
       const callId = asString(record.call_id)
       const name = asString(record.name)
@@ -578,7 +709,7 @@ export function parseResponsesInput(input: unknown, target: { provider: string; 
     }
     if (role === 'user') {
       messages.push(createUserMessage({
-        content: [{ type: 'text', text: asContentText(record.content) }],
+        content: await contentBlocksFromOpenAi(record.content, imageWriter),
         source: { kind: 'user' },
       }))
       continue

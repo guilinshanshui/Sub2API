@@ -105,6 +105,8 @@ export interface AutomationDeps {
   accounts: readonly AutomationAccountSnapshot[]
   credentials: AutomationCredentialStore
   appendRuns(records: readonly AutomationRunRecord[]): Promise<void>
+  /** 读取已落盘的运行记录（最新在前），用于合并同一天的分服务商签到结果。 */
+  runs?(): Promise<readonly AutomationRunRecord[]>
   jobs(): Promise<readonly AutomationJobRecord[]>
   setJobs(jobs: readonly AutomationJobRecord[]): Promise<void>
   config(): Promise<AutomationConfig>
@@ -356,28 +358,66 @@ export async function runAutomationJob(
   const job = jobs.find((item) => item.id === jobId)
   if (job === undefined) return []
 
-  if (jobId === 'all_daily_signin') {
-    const records = await runAllDailySignin(deps, jobId, filter.provider)
+  // 全服务商签到是逐账号串行的长流程（每账号最多 15~30s 超时，可能跑几分钟），
+  // 且调度器会按服务商分别触发。运行期间必须让卡片显示「执行中」，
+  // 否则用户点完只能看到上一次的失败结果，以为点击没生效。
+  if (RUNNING_JOBS.has(jobId)) {
+    throw new Error('该任务正在执行中，请等当前一轮结束后再试')
+  }
+  RUNNING_JOBS.add(jobId)
+  try {
+    await persistJobRunning(deps, jobs, jobId)
+
+    if (jobId === 'all_daily_signin') {
+      const records = await runAllDailySignin(deps, jobId, filter.provider)
+      await deps.appendRuns(records)
+      await persistJobRun(deps, jobs, jobId, records)
+      return records
+    }
+
+    const accounts = automationEnabledAccounts(deps).filter((account) =>
+      (filter.provider === undefined || filter.provider === account.provider) &&
+      (filter.accountId === undefined || filter.accountId === account.id),
+    )
+    const records: AutomationRunRecord[] = []
+    for (const account of accounts) {
+      records.push(await runAccountJob(deps, jobId, account))
+      await sleep(250)
+    }
+    if (records.length === 0) {
+      records.push(makeRun(jobId, 'all', 'skipped', Date.now(), '没有可执行的启用账号', {}))
+    }
     await deps.appendRuns(records)
     await persistJobRun(deps, jobs, jobId, records)
     return records
+  } finally {
+    RUNNING_JOBS.delete(jobId)
   }
+}
 
-  const accounts = automationEnabledAccounts(deps).filter((account) =>
-    (filter.provider === undefined || filter.provider === account.provider) &&
-    (filter.accountId === undefined || filter.accountId === account.id),
-  )
-  const records: AutomationRunRecord[] = []
-  for (const account of accounts) {
-    records.push(await runAccountJob(deps, jobId, account))
-    await sleep(250)
-  }
-  if (records.length === 0) {
-    records.push(makeRun(jobId, 'all', 'skipped', Date.now(), '没有可执行的启用账号', {}))
-  }
-  await deps.appendRuns(records)
-  await persistJobRun(deps, jobs, jobId, records)
-  return records
+/**
+ * 进程内运行中标记。
+ *
+ * 只需防同一进程内的重复点击/调度重叠：定时器每 60s 轮询一次，而一次
+ * 全服务商签到可能更久，没有这个锁就会出现两轮并发签到（触发风控）。
+ */
+const RUNNING_JOBS = new Set<string>()
+
+/** 把任务标成「执行中」，使前端在长流程期间不再展示上一次的结论。 */
+async function persistJobRunning(
+  deps: AutomationDeps,
+  jobs: readonly AutomationJobRecord[],
+  jobId: string,
+): Promise<void> {
+  const nextJobs = jobs.map((item) => item.id === jobId
+    ? {
+        ...item,
+        lastRunAt: Date.now(),
+        lastStatus: 'running' as const,
+        lastMessage: '正在执行…',
+      }
+    : item)
+  await deps.setJobs(nextJobs)
 }
 
 async function persistJobRun(
@@ -387,12 +427,10 @@ async function persistJobRun(
   records: readonly AutomationRunRecord[],
 ): Promise<void> {
   const completedAt = Date.now()
-  const status = summarizeStatus(records)
-  const message = records.some((record) => record.status === 'error')
-    ? records.find((record) => record.status === 'error')?.message ?? ''
-    : records.length === 1
-      ? records[0]?.message ?? ''
-      : `${records.filter((record) => record.status === 'success').length} 个成功，${records.filter((record) => record.status === 'skipped').length} 个跳过，${records.filter((record) => record.status === 'error').length} 个失败`
+  const summarized = jobId === 'all_daily_signin'
+    ? await aggregateDailySigninRuns(deps, records, completedAt)
+    : records
+  const { status, message } = summarizeJobRun(summarized)
   const nextJobs = jobs.map((item) => item.id === jobId
     ? {
         ...item,
@@ -402,6 +440,90 @@ async function persistJobRun(
       }
     : item)
   await deps.setJobs(nextJobs)
+}
+
+/**
+ * 把本次签到结果与**同一天已落盘**的其它服务商结果合并。
+ *
+ * 为什么需要：调度器按服务商分别触发「全服务商每日签到」（每个服务商可配
+ * 自己的时间），每次只产生一条记录。若直接用它覆盖任务状态，最后一个跑的
+ * 服务商就决定了整张卡片的成败 —— 实测表现为「其余服务商都成功，卡片却
+ * 显示失败」（真实报障 2026-10-02）。
+ *
+ * 一次性的全量运行（不带 provider 过滤）本就是完整快照，直接返回。
+ */
+async function aggregateDailySigninRuns(
+  deps: AutomationDeps,
+  records: readonly AutomationRunRecord[],
+  completedAt: number,
+): Promise<readonly AutomationRunRecord[]> {
+  if (records.length > 1 || deps.runs === undefined) return records
+  let persisted: readonly AutomationRunRecord[]
+  try {
+    persisted = await deps.runs()
+  } catch {
+    return records
+  }
+  const today = currentShanghaiTime(completedAt).date
+  // 同一服务商只保留当天最后一次结果（后写入的生效）。
+  // `automationRuns()` 是**最新在前**，所以从末尾向前遍历，让新的覆盖旧的。
+  const merged = new Map<string, AutomationRunRecord>()
+  for (let index = persisted.length - 1; index >= 0; index -= 1) {
+    const record = persisted[index]
+    if (record === undefined) continue
+    if (record.jobId !== 'all_daily_signin') continue
+    if (currentShanghaiTime(record.completedAt).date !== today) continue
+    merged.set(record.provider ?? record.task, record)
+  }
+  for (const record of records) merged.set(record.provider ?? record.task, record)
+  return [...merged.values()]
+}
+
+function summarizeJobRun(
+  records: readonly AutomationRunRecord[],
+): { status: ReturnType<typeof summarizeStatus>; message: string } {
+  const status = summarizeStatus(records)
+  const succeeded = records.filter((record) => record.status === 'success')
+  const skipped = records.filter((record) => record.status === 'skipped')
+  const failed = records.filter((record) => record.status === 'error')
+  const summary = `${succeeded.length} 个服务商成功，${skipped.length} 个跳过，${failed.length} 个失败`
+
+  if (records.length === 1) {
+    return { status, message: records[0]?.message ?? summary }
+  }
+  if (failed.length > 0) {
+    return {
+      status,
+      message: `${summary}；${failed.map((record) => summarizeRun(record)).join('；')}`,
+    }
+  }
+  if (succeeded.length > 0) {
+    return {
+      status,
+      message: `${summary}：${succeeded.map((record) => summarizeRun(record)).join('；')}`,
+    }
+  }
+  return { status, message: summary }
+}
+
+function summarizeRun(record: AutomationRunRecord): string {
+  const label = PROVIDER_LABELS[record.task] ?? record.task
+  const message = record.message ?? '已完成'
+  return `${label}：${message}`
+}
+
+const PROVIDER_LABELS: Readonly<Record<string, string>> = {
+  codearts: '华为 CodeArts',
+  buddy: '腾讯 CodeBuddy',
+  workbuddy: 'WorkBuddy (国际版)',
+  lobsterai: '有道 LobsterAI',
+  qoder: 'Qoder',
+  qodercn: 'Qoder 中国版',
+  trae: 'TRAE',
+  loomy: '讯飞 Loomy',
+  phanthy: 'PhanthyCode',
+  cline: 'Cline',
+  raccoon: 'Raccoon Work',
 }
 
 async function runAllDailySignin(
@@ -438,13 +560,16 @@ async function runAllDailySignin(
         : summary.claimed > 0 || summary.alreadyClaimed > 0
           ? 'success'
           : 'skipped'
-      const message = summary.claimed === 0 && summary.alreadyClaimed === 0 && summary.inactive > 0
-        ? `${summary.inactive} 个账号当前不可签到`
-        : summary.claimed > 0
-          ? `新增 ${summary.claimed} 个签到，获得 ${summary.totalCredit} 积分`
-          : summary.alreadyClaimed > 0
-            ? `${summary.alreadyClaimed} 个账号今日已签到`
-            : '没有可执行账号'
+      // ⚠️ **失败必须出现在文案里**。旧实现只在 claimed/alreadyClaimed/inactive
+      // 都为空时回一句「没有可执行账号」，于是「账号存在但凭据失效、全部请求
+      // 被拒」这种最常见的故障被伪装成「没账号」（真实报障 2026-10-02：用户
+      // 看到 Qoder/TRAE 报「没有可执行账号」，以为任务没跑完）。
+      const parts: string[] = []
+      if (summary.claimed > 0) parts.push(`新增 ${summary.claimed} 个签到，获得 ${summary.totalCredit} 积分`)
+      if (summary.alreadyClaimed > 0) parts.push(`${summary.alreadyClaimed} 个账号今日已签到`)
+      if (summary.inactive > 0) parts.push(`${summary.inactive} 个账号当前不可签到`)
+      if (summary.failed > 0) parts.push(`${summary.failed} 个账号执行失败`)
+      const message = parts.length > 0 ? parts.join('；') : '没有可执行账号'
       const details = {
         summary,
         results: result.results,

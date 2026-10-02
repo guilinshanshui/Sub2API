@@ -2792,6 +2792,45 @@ th.actions {
   border-top: 1px solid var(--border);
 }
 
+.automation-run {
+  gap: 10px;
+}
+
+.run-accounts {
+  display: grid;
+  gap: 5px;
+  padding-top: 9px;
+  border-top: 1px dashed var(--border);
+}
+
+.run-account {
+  display: grid;
+  grid-template-columns: minmax(90px, 150px) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 11px;
+}
+
+.run-account strong {
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.run-account span {
+  overflow: hidden;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.run-account span:hover {
+  overflow: visible;
+  white-space: normal;
+}
+
 .task-row strong {
   overflow-wrap: anywhere;
   font-size: 13px;

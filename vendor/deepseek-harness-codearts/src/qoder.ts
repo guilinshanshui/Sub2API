@@ -139,7 +139,9 @@ export function buildQoderPollUrl(session: QoderDeviceSession, product: QoderPro
  * `security_oauth_token` 与 `access_token` **双写同值**：Qoder 的取用顺序是
  * `security_oauth_token ?? access_token`（源码 `a6e()`），双写可兼容两种路径。
  *
- * `machine_id` **必须持久化**：续期请求体需要它，且它参与服务端的设备绑定。
+ * `machine_id` **必须持久化**：登录时生成，参与服务端的设备绑定，加密推理也用它
+ * （见 `src/qoder-wasm.ts`）。但它**不参与续期** —— 客户端续期只发 `refresh_token`
+ * （见 `qoderRefreshBody`）。
  */
 export interface QoderCredential {
   security_oauth_token: string
@@ -280,14 +282,21 @@ export function isQoderExpired(credential: QoderCredential, nowMs: number = Date
 /**
  * 续期请求体。
  *
- * 源码的 `getMachineIdentityRequestFields` 会在两个字段都存在时才带上，
- * 且 `machine_token` 来自 UMID 子系统（本插件没有）—— 故只发
- * `refresh_token` 与 `machine_id`。
+ * 实测证据（Qoder 桌面客户端 0.4.3 `app.asar`，2026-10-02 反查）：
+ *
+ * ```js
+ * body: JSON.stringify({ refresh_token: e.refreshToken })
+ * ```
+ *
+ * 即**只发 `refresh_token`**，既不带 `machine_id`，也不带任何机器身份字段。
+ * 早期这里按 `getMachineIdentityRequestFields` 的推测多发了 `machine_id`；
+ * 对照实验（同一账号、该字段在/不在）响应完全一致 —— 健康账号 `200`、
+ * 失效账号 `401` —— 说明它不影响服务端判定。这里按客户端原样收敛为
+ * 单字段，避免发送上游未声明的入参。
  */
 export function qoderRefreshBody(credential: QoderCredential): Record<string, string> {
   return {
     refresh_token: credential.refresh_token ?? '',
-    machine_id: credential.machine_id,
   }
 }
 

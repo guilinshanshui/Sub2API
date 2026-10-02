@@ -259,20 +259,32 @@ function toPackage(
 }
 
 /**
- * 查询 Qoder 账号积分余额。
+ * 余额查询的带原因结果。
  *
- * 返回 `null` 表示**查不到**（网络失败 / 401 / 响应形状非法），
- * 与「余额为 0」严格区分 —— 失败时 UI 应显示原因而不是 0。
- *
- * 企业版账号（`displayMode === 'enterprise'`）返回 `null`：
- * 那种模式不提供额度数字，只给一个外部链接（`enterpriseUsage.detailUrl`），
- * 报 0 会误导用户以为没额度。
+ * 为什么需要它：`fetchQoderCreditBalance` 用 `null` 同时表达「网络失败」
+ * 「401」「响应形状非法」三种情形，用户只能看到一句无信息量的
+ * 「积分查询失败（凭据失效或响应异常）」（真实报障，2026-10-02）。
+ * 调用方还需要一个**可编程**的信号来决定要不要续期重试。
  */
-export async function fetchQoderCreditBalance(
+export interface QoderBalanceResult {
+  balance: CreditBalance | null
+  /** 人类可读失败原因；成功时为 undefined。 */
+  error?: string
+  /** 服务端拒绝该凭据（HTTP 401/403），调用方应续期后重试一次。 */
+  credentialRejected: boolean
+}
+
+/**
+ * 查询 Qoder 账号积分余额（带失败原因与凭据被拒信号）。
+ *
+ * 与 {@link fetchQoderCreditBalance} 的关系：后者是它的 `null` 投影。
+ * 两者共用同一段解析，避免「错误文案」与「实际判定」逐渐分叉。
+ */
+export async function fetchQoderCreditBalanceDetailed(
   credential: QoderCredential,
   product: QoderProduct,
   fetcher: typeof fetch = fetch,
-): Promise<CreditBalance | null> {
+): Promise<QoderBalanceResult> {
   let response: Response
   try {
     response = await fetcher(`${product.openApiBase}${QODER_USAGE_PATH}`, {
@@ -280,30 +292,51 @@ export async function fetchQoderCreditBalance(
       headers: await creditsHeaders(credential, product),
       signal: AbortSignal.timeout(QODER_CREDITS_TIMEOUT_MS),
     })
-  } catch {
-    // 网络失败：返回 null（与其它 provider 同语义），不抛错。
-    return null
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    return { balance: null, credentialRejected: false, error: `用量接口请求失败：${reason}` }
   }
 
-  // 401/403 是凭据问题，其它非 2xx 是服务端问题 —— 两者都返回 null，
-  // 由调用方统一显示「查询失败」原因。
-  if (!response.ok) return null
+  if (response.status === 401 || response.status === 403) {
+    return {
+      balance: null,
+      credentialRejected: true,
+      error: `凭据已失效（HTTP ${response.status}），请重新登录该账号`,
+    }
+  }
+  if (!response.ok) {
+    return {
+      balance: null,
+      credentialRejected: false,
+      error: `用量接口返回 HTTP ${response.status}`,
+    }
+  }
 
   let body: unknown
   try {
     body = await response.json()
   } catch {
-    return null
+    return { balance: null, credentialRejected: false, error: '用量接口返回了非 JSON 响应' }
   }
 
-  if (typeof body !== 'object' || body === null || Array.isArray(body)) return null
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+    return { balance: null, credentialRejected: false, error: '用量响应形状异常（不是对象）' }
+  }
   const root = body as Record<string, unknown>
 
   // 企业版：无额度数字，只有外部链接。返回 null 而非 0（见函数注释）。
-  if (root.displayMode === 'enterprise') return null
+  if (root.displayMode === 'enterprise') {
+    return {
+      balance: null,
+      credentialRejected: false,
+      error: '企业版账号不提供积分数字，请到 Qoder 后台查看用量',
+    }
+  }
 
   const usage = root.qoderUsage
-  if (typeof usage !== 'object' || usage === null) return null
+  if (typeof usage !== 'object' || usage === null) {
+    return { balance: null, credentialRejected: false, error: '用量响应缺少 qoderUsage 字段' }
+  }
 
   const packages: CreditPackage[] = []
   // 顺序即展示顺序：套餐额度 → 赠送/资源包 → 专用资源包。
@@ -326,10 +359,27 @@ export async function fetchQoderCreditBalance(
 
   // 一个包都没解析出来 → 视为「查不到」（响应形状与预期不符），
   // 而不是「余额为 0」——后者会让用户以为额度被清空了。
-  if (packages.length === 0) return null
+  if (packages.length === 0) {
+    return { balance: null, credentialRejected: false, error: '用量响应未包含任何积分包' }
+  }
 
   const total = roundCredits(packages.reduce((sum, pkg) => sum + pkg.remaining, 0))
-  return { total, packages, expiredTotal: 0 }
+  return { balance: { total, packages, expiredTotal: 0 }, credentialRejected: false }
+}
+
+/**
+ * 查询 Qoder 账号积分余额。
+ *
+ * 返回 `null` 表示**查不到**（网络失败 / 401 / 响应形状非法），
+ * 与「余额为 0」严格区分。需要具体原因时用
+ * {@link fetchQoderCreditBalanceDetailed}。
+ */
+export async function fetchQoderCreditBalance(
+  credential: QoderCredential,
+  product: QoderProduct,
+  fetcher: typeof fetch = fetch,
+): Promise<CreditBalance | null> {
+  return (await fetchQoderCreditBalanceDetailed(credential, product, fetcher)).balance
 }
 
 /** 把 `CreditBalance` 压成一行可读摘要（供探针与日志使用）。 */
@@ -407,11 +457,22 @@ function benefitAmount(item: unknown): number | undefined {
  * 抽出来是因为 `fetchQoderCheckinStatus` 与 `claimQoderDailyCheckin`
  * 都需要它 —— 早期两处各写一次，会**重复发一次 GET**。
  */
-async function loadCampaigns(
+/** 活动列表的带原因加载结果（供须区分失败类型的调用方使用）。 */
+export interface QoderCampaignsLoad {
+  campaigns?: QoderCampaigns
+  /** HTTP 状态码；网络失败时为 undefined。 */
+  status?: number
+  /** 人类可读失败原因；成功时为 undefined。 */
+  error?: string
+  /** 服务端拒绝该凭据（HTTP 401/403），调用方应续期后重试一次。 */
+  credentialRejected: boolean
+}
+
+async function loadCampaignsDetailed(
   credential: QoderCredential,
   product: QoderProduct,
   fetcher: typeof fetch,
-): Promise<QoderCampaigns | undefined> {
+): Promise<QoderCampaignsLoad> {
   let response: Response
   try {
     response = await fetcher(`${product.openApiBase}${QODER_CAMPAIGNS_PATH}`, {
@@ -419,13 +480,43 @@ async function loadCampaigns(
       headers: await creditsHeaders(credential, product),
       signal: AbortSignal.timeout(QODER_CREDITS_TIMEOUT_MS),
     })
-  } catch {
-    return undefined
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    return { credentialRejected: false, error: `活动列表请求失败：${reason}` }
   }
-  if (!response.ok) return undefined
+  if (response.status === 401 || response.status === 403) {
+    return {
+      status: response.status,
+      credentialRejected: true,
+      error: `凭据已失效（HTTP ${response.status}），请重新登录该账号`,
+    }
+  }
+  if (!response.ok) {
+    return {
+      status: response.status,
+      credentialRejected: false,
+      error: `活动列表接口返回 HTTP ${response.status}`,
+    }
+  }
   let body: unknown
-  try { body = await response.json() } catch { return undefined }
-  return parseQoderCampaigns(body)
+  try {
+    body = await response.json()
+  } catch {
+    return { status: response.status, credentialRejected: false, error: '活动列表接口返回了非 JSON 响应' }
+  }
+  const parsed = parseQoderCampaigns(body)
+  if (parsed === undefined) {
+    return { status: response.status, credentialRejected: false, error: '活动列表响应形状异常' }
+  }
+  return { campaigns: parsed, status: response.status, credentialRejected: false }
+}
+
+async function loadCampaigns(
+  credential: QoderCredential,
+  product: QoderProduct,
+  fetcher: typeof fetch,
+): Promise<QoderCampaigns | undefined> {
+  return (await loadCampaignsDetailed(credential, product, fetcher)).campaigns
 }
 
 /**
@@ -607,9 +698,16 @@ export async function claimQoderDailyCheckin(
   product: QoderProduct,
   fetcher: typeof fetch = fetch,
 ): Promise<ClaimOutcome> {
-  const parsed = await loadCampaigns(credential, product, fetcher)
+  const loaded = await loadCampaignsDetailed(credential, product, fetcher)
+  const parsed = loaded.campaigns
   if (parsed === undefined) {
-    return { kind: 'failed', code: -1, message: '活动列表查询失败' }
+    // ⚠️ 带上 HTTP 状态码：调用方据此判定「凭据被拒（401/403）」并续期重试；
+    // 旧实现把所有失败压成 code=-1「活动列表查询失败」，用户看不到任何线索。
+    return {
+      kind: 'failed',
+      code: loaded.status ?? -1,
+      message: loaded.error ?? '活动列表查询失败',
+    }
   }
 
   const targets = claimableCampaigns(parsed)

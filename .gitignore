@@ -19,3 +19,4 @@ data/
 .research/
 test-results/
 playwright-report/
+release/

@@ -299,10 +299,10 @@ export function registerOpenAiRoutes(app: FastifyInstance, options: OpenAiRouteO
         maxTokens: chat.maxTokens,
         stop: chat.stop,
       }
-      const parsedMessages = parseMessagesForOpenAi(chat.messages, {
+      const parsedMessages = await parseMessagesForOpenAi(chat.messages, {
         provider: parsed.model.provider,
         model: parsed.model.upstreamId,
-      })
+      }, options.runtime.attachments)
       requestOptions.messages = parsedMessages.messages
       requestOptions.system = parsedMessages.system
 
@@ -389,10 +389,10 @@ export function registerOpenAiRoutes(app: FastifyInstance, options: OpenAiRouteO
     try {
       parsed = await prepareRequest(request, reply, options)
       if (parsed === undefined) return
-      const responseInput = parseResponsesInput(parsed.body.input, {
+      const responseInput = await parseResponsesInput(parsed.body.input, {
         provider: parsed.model.provider,
         model: parsed.model.upstreamId,
-      })
+      }, options.runtime.attachments)
       const settings = options.storage.getSettings()
       timeout = createTimeoutSignal(request, reply, settings.requestTimeoutMs)
       const tools = Array.isArray(parsed.body.tools)

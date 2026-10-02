@@ -15,18 +15,27 @@ import {
 } from '../components/ui.js'
 import type { AutomationStatus } from '../types.js'
 
-const STATUS_LABELS: Record<AutomationStatus['runs'][number]['status'], string> = {
+/**
+ * 任务卡片的「上次结果」比运行记录多一个 `running` —— 全服务商签到是长
+ * 流程（逐账号串行，可能几分钟），执行期间必须显示「执行中」而不是上一次
+ * 的失败结果，否则用户会以为点击没生效。
+ */
+type JobStatusKey = NonNullable<AutomationStatus['jobs'][number]['lastStatus']>
+
+const STATUS_LABELS: Record<JobStatusKey, string> = {
   success: '成功',
   skipped: '跳过',
   unverified: '未确认',
   error: '失败',
+  running: '执行中',
 }
 
-const STATUS_TONES: Record<AutomationStatus['runs'][number]['status'], 'success' | 'warning' | 'danger' | 'neutral'> = {
+const STATUS_TONES: Record<JobStatusKey, 'success' | 'warning' | 'danger' | 'neutral'> = {
   success: 'success',
   skipped: 'neutral',
   unverified: 'warning',
   error: 'danger',
+  running: 'warning',
 }
 
 const SIGNIN_COVERAGE = [
@@ -46,9 +55,53 @@ const SIGNIN_SKIPS = [
   { name: 'Raccoon Work', reason: '每日积分由服务端自动发放' },
 ] as const
 
+const PROVIDER_LABELS: Record<string, string> = {
+  codearts: '华为 CodeArts',
+  buddy: '腾讯 CodeBuddy',
+  workbuddy: 'WorkBuddy (国际版)',
+  lobsterai: '有道 LobsterAI',
+  qoder: 'Qoder',
+  qodercn: 'Qoder 中国版',
+  trae: 'TRAE',
+  loomy: '讯飞 Loomy',
+  phanthy: 'PhanthyCode',
+  cline: 'Cline',
+  raccoon: 'Raccoon Work',
+}
+
 function taskLabel(jobId: string, run: AutomationStatus['runs'][number]): string {
   if (run.accountId === undefined) return run.task
   return `${jobId} · ${run.task}`
+}
+
+interface ClaimAccountResult {
+  accountId?: string
+  nickname?: string
+  outcome?: {
+    kind?: string
+    message?: string
+    credit?: number
+  }
+}
+
+function claimResultTone(outcome: ClaimAccountResult['outcome']): 'success' | 'warning' | 'danger' | 'neutral' {
+  if (outcome?.kind === 'claimed') return 'success'
+  if (outcome?.kind === 'already-claimed') return 'neutral'
+  if (outcome?.kind === 'failed') return 'danger'
+  if (outcome?.kind === 'inactive' || outcome?.kind === 'skipped') return 'warning'
+  return 'neutral'
+}
+
+function claimResultLabel(outcome: ClaimAccountResult['outcome']): string {
+  const labels: Record<string, string> = {
+    claimed: '已领',
+    'already-claimed': '已签',
+    inactive: '不可签',
+    skipped: '跳过',
+    failed: '失败',
+  }
+  const kind = outcome?.kind
+  return kind !== undefined && labels[kind] !== undefined ? labels[kind] : '未知'
 }
 
 function formatSchedule(schedule: readonly string[]): string {
@@ -622,16 +675,32 @@ export function AutomationPage() {
             ) : (
               <div className="usage-list">
                 {status?.runs.slice(0, 50).map((run) => (
-                  <article key={run.id} className="usage-item">
+                  <article key={run.id} className="usage-item automation-run">
                     <div className="usage-item-main">
                       <div className="usage-item-heading">
-                        <div className="cell-main">{taskLabel(run.jobId, run)}</div>
+                        <div className="cell-main">{run.provider === undefined ? taskLabel(run.jobId, run) : PROVIDER_LABELS[run.provider] ?? run.task}</div>
                         <Badge tone={STATUS_TONES[run.status]}>{STATUS_LABELS[run.status]}</Badge>
                       </div>
                       <div className="usage-item-meta">
                         <span>{formatDate(run.completedAt)}</span>
                         <span className="run-message">{run.message ?? '-'}</span>
                       </div>
+                      {Array.isArray(run.details?.results) && run.details?.results.length > 0 ? (
+                        <div className="run-accounts">
+                          {(run.details.results as ClaimAccountResult[]).map((item) => {
+                            const id = item.accountId ?? '账号'
+                            return (
+                              <div className="run-account" key={id}>
+                                <strong title={id}>{item.nickname ?? id}</strong>
+                                <Badge tone={claimResultTone(item.outcome)}>{claimResultLabel(item.outcome)}</Badge>
+                                {item.outcome?.message === undefined ? null : (
+                                  <span title={item.outcome.message}>{item.outcome.message}</span>
+                                )}
+                              </div>
+                            )
+                          })}
+                        </div>
+                      ) : null}
                     </div>
                   </article>
                 ))}

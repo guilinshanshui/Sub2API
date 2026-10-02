@@ -8,7 +8,7 @@
  * | 维度 | codearts | buddy/workbuddy | lobsterai | qoder |
  * |------|----------|-----------------|-----------|-------|
  * | 登录 | OAuth 回调 | external-link 轮询 | 本地回调 + authCode | PKCE 设备码轮询 |
- * | 续期 | refresh_token | refresh_token | refresh_token + 身份字段 | refresh_token + machine_id |
+ * | 续期 | refresh_token | refresh_token | refresh_token + 身份字段 | refresh_token（单一字段） |
  * | 签名 | HMAC-SHA256 | 无 | 无 | 无（推理） |
  *
  * 且 `BuddyProduct.id` 是字面量联合 `'buddy' | 'workbuddy'`，加值会牵动

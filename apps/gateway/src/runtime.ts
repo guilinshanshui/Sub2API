@@ -2,6 +2,7 @@ import path from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { CommandRuntime } from '@deepseek-ai/dsh-commands'
 import { LlmRuntime } from '@deepseek-ai/dsh-llm'
+import { LocalAttachmentStore } from './attachments.js'
 import type { GatewayConfig } from './config.js'
 import { EncryptedCredentialProvider } from './credentials.js'
 import type { JetHubClient, JetHubRegistration } from './jet-hub.js'
@@ -18,6 +19,7 @@ export interface UpstreamRuntime {
 }
 
 export interface GatewayRuntime extends UpstreamRuntime {
+  attachments: LocalAttachmentStore
   dispose(): Promise<void>
 }
 
@@ -41,6 +43,7 @@ export async function createGatewayRuntime(
   })
   const llm = new LlmRuntime(ctx)
   new CommandRuntime(ctx)
+  const attachments = new LocalAttachmentStore(ctx, path.join(config.dataDir, 'attachments'))
 
   let registeredHandler: ((request: Request) => Promise<Response>) | undefined
   const connection: JetHubRegistration = {
@@ -72,6 +75,7 @@ export async function createGatewayRuntime(
     ctx,
     llm,
     credentials,
+    attachments,
     accountPool,
     async dispose() {
       jetHub.clearHandler(registeredHandler)

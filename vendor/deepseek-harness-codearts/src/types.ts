@@ -673,7 +673,8 @@ export interface AutomationJobRecord {
   schedule: string[]
   enabled: boolean
   lastRunAt?: number
-  lastStatus?: 'success' | 'skipped' | 'unverified' | 'error'
+  /** 加入 `running` 是为了让长流程（全服务商签到）在执行期间可被前端识别。 */
+  lastStatus?: 'success' | 'skipped' | 'unverified' | 'error' | 'running'
   lastMessage?: string
 }
 

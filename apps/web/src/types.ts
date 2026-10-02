@@ -82,7 +82,7 @@ export interface AutomationJob {
   schedule: string[]
   enabled: boolean
   lastRunAt?: number
-  lastStatus?: 'success' | 'skipped' | 'unverified' | 'error'
+  lastStatus?: 'success' | 'skipped' | 'unverified' | 'error' | 'running'
   lastMessage?: string
 }
 

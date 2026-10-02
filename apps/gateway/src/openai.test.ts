@@ -1,4 +1,9 @@
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+import { Context } from '@deepseek-ai/cordis'
 import { describe, expect, it, vi } from 'vitest'
+import { LocalAttachmentStore } from './attachments.js'
 import {
   createCompletion,
   ModelCatalog,
@@ -8,6 +13,8 @@ import {
 } from './openai.js'
 import type { GatewayRuntime } from './runtime.js'
 import type { GatewaySettings } from './types.js'
+
+const PNG_1X1 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
 
 const settings: GatewaySettings = {
   defaultProvider: '',
@@ -72,8 +79,8 @@ describe('ModelCatalog', () => {
 })
 
 describe('OpenAI request parsing', () => {
-  it('restores assistant tool calls and tool results', () => {
-    const parsed = parseMessagesForOpenAi([
+  it('restores assistant tool calls and tool results', async () => {
+    const parsed = await parseMessagesForOpenAi([
       { role: 'system', content: 'You are concise.' },
       {
         role: 'assistant',
@@ -93,8 +100,8 @@ describe('OpenAI request parsing', () => {
     expect(JSON.stringify(parsed.messages)).toContain('tool-result')
   })
 
-  it('restores Responses function-call history', () => {
-    const parsed = parseResponsesInput([
+  it('restores Responses function-call history', async () => {
+    const parsed = await parseResponsesInput([
       { type: 'function_call', call_id: 'call_2', name: 'lookup', arguments: '{"q":"x"}' },
       { type: 'function_call_output', call_id: 'call_2', output: '{"found":true}' },
     ], { provider: 'provider-a', model: 'shared' })
@@ -104,11 +111,51 @@ describe('OpenAI request parsing', () => {
     expect(JSON.stringify(parsed.messages)).toContain('tool-result')
   })
 
-  it('rejects image inputs with a clear protocol error', () => {
-    expect(() => parseMessagesForOpenAi([
+  it('rejects image inputs when the attachment service is unavailable', async () => {
+    await expect(parseMessagesForOpenAi([
       { role: 'user', content: [{ type: 'image_url', image_url: { url: 'https://example.com/a.png' } }] },
     ], { provider: 'provider-a', model: 'shared' }))
-      .toThrow(OpenAiRequestError)
+      .rejects.toThrow(OpenAiRequestError)
+  })
+
+  it('stores a data URL image through the attachment writer', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'sub2api-images-'))
+    const store = new LocalAttachmentStore(new Context(), root)
+    try {
+      const parsed = await parseMessagesForOpenAi([
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'what is this' },
+            { type: 'image_url', image_url: { url: `data:image/png;base64,${PNG_1X1}` } },
+          ],
+        },
+      ], { provider: 'provider-a', model: 'shared' }, store)
+
+      const content = parsed.messages[0]?.content ?? []
+      expect(content.map((block) => block.type)).toEqual(['text', 'image'])
+      const image = content[1]
+      if (image?.type !== 'image') throw new Error('expected an image block')
+      expect(image.attachment.mediaType).toBe('image/png')
+      expect(image.attachment.width).toBe(1)
+      await expect(store.readImage(image.attachment)).resolves.toMatchObject({ ref: image.attachment })
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects bytes whose magic number contradicts the declared type', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'sub2api-images-'))
+    const store = new LocalAttachmentStore(new Context(), root)
+    try {
+      const png = new Uint8Array(Buffer.from(PNG_1X1, 'base64'))
+      await expect(store.saveImage({ data: png, mediaType: 'image/jpeg' }))
+        .rejects.toThrow(/does not match/u)
+      await expect(store.saveImage({ data: new Uint8Array([1, 2, 3, 4]), mediaType: 'image/png' }))
+        .rejects.toThrow(/not a supported raster image/u)
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
   })
 })
 

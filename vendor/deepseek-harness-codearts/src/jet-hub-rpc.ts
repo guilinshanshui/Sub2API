@@ -55,7 +55,11 @@ import {
   withQoderNickname,
 } from './qoder.js'
 import type { QoderCredential } from './qoder.js'
-import { claimQoderDailyCheckin, fetchQoderCreditBalance } from './qoder-credits.js'
+import {
+  claimQoderDailyCheckin,
+  fetchQoderCreditBalanceDetailed,
+  type QoderBalanceResult,
+} from './qoder-credits.js'
 import { isTraeRefreshable, traeCredentialExpiresAtMs, traeDisplayNickname } from './trae.js'
 import type { TraeCredential } from './trae.js'
 import { fetchClineCreditBalance } from './cline-credits.js'
@@ -353,6 +357,14 @@ export interface CreditsEndpointDeps<
   fetchStatus?: (credential: TCredential, product: TProduct) => Promise<CheckinStatus | null>
   /** 执行签到领取；默认使用真实的 claimDailyCheckin。 */
   claim?: (credential: TCredential, product: TProduct, entry: ProviderAccountEntry) => Promise<ClaimOutcome>
+  /**
+   * 凭据被服务端拒绝（401/403）时的恢复钩子。
+   *
+   * 返回新凭据则重试一次 claim；返回 undefined 表示无法恢复。
+   * 只有 Qoder 需要它：它的 access_token 会被服务端提前作废，而
+   * 账号池里的 `expiresAt` 仍是未来时间，所以不续期就永远查不动也领不了。
+   */
+  recover?: (entry: ProviderAccountEntry, credential: TCredential) => Promise<TCredential | undefined>
   /** 查询积分余额；默认使用真实的 fetchCreditBalance。 */
   fetchBalance?: (credential: TCredential, product: TProduct) => Promise<CreditBalance | null>
   /**
@@ -499,21 +511,35 @@ export async function collectClaimResults<TCredential = BuddyCredential, TProduc
       if (resolved === undefined) {
         outcome = { kind: 'failed', code: -1, message: '凭据未配置' }
       } else {
-        const credential = JSON.parse(resolved.value) as TCredential
-        if (!precheck) {
-          // 领取流程自带状态判断（LobsterAI 的 slot/context 检查在 claim 内部）。
-          outcome = await claim(credential, product, entry)
-        } else {
+        let credential = JSON.parse(resolved.value) as TCredential
+        const attempt = async (): Promise<ClaimOutcome> => {
+          if (!precheck) {
+            // 领取流程自带状态判断（LobsterAI 的 slot/context 检查在 claim 内部）。
+            return claim(credential, product, entry)
+          }
           // 先查状态：活动未开启或今日已领则跳过领取请求，减少无效调用
           const status = await fetchStatus(credential, product)
           if (status !== null && !status.active) {
-            outcome = { kind: 'inactive', message: '签到活动未开启' }
-          } else if (status !== null && status.todayCheckedIn) {
-            outcome = { kind: 'already-claimed', message: '今天已签到' }
-          } else {
-            // 状态查询失败（status 为 null）时仍然尝试领取：
-            // 无法确认不代表不能领，交给领取接口以响应体 code 定夺。
-            outcome = await claim(credential, product, entry)
+            return { kind: 'inactive', message: '签到活动未开启' }
+          }
+          if (status !== null && status.todayCheckedIn) {
+            return { kind: 'already-claimed', message: '今天已签到' }
+          }
+          // 状态查询失败（status 为 null）时仍然尝试领取：
+          // 无法确认不代表不能领，交给领取接口以响应体 code 定夺。
+          return claim(credential, product, entry)
+        }
+        outcome = await attempt()
+        // 凭据被服务端提前作废时（账号池里的 expiresAt 仍是未来时间），
+        // 先续期一次再重试，否则用户每次都得手动重新登录。
+        if (deps.recover !== undefined
+          && outcome.kind === 'failed'
+          && (outcome.code === 401 || outcome.code === 403)) {
+          const recovered = await deps.recover(entry, credential)
+          if (recovered !== undefined) {
+            credential = recovered
+            deps.warn?.(`[jet-hub] credits.claimAll 账号 ${entry.id} 已续期凭据，重试一次`)
+            outcome = await attempt()
           }
         }
       }
@@ -601,6 +627,27 @@ export async function collectCreditBalances<TCredential = BuddyCredential, TProd
     })
   }
   return results
+}
+
+/**
+ * 把 Qoder 余额查询的失败结果转成给用户的原因文案。
+ *
+ * 区分三种「查不到」并给出下一步动作：凭据被拒（可续期 → 已尝试续期）、
+ * 企业版账号（去后台看用量）、其它服务端 / 网络问题（稍后重试）。
+ */
+function qoderBalanceFailureText(
+  result: QoderBalanceResult,
+  refreshable: boolean,
+): string | undefined {
+  if (result.balance !== null) return undefined
+  if (result.credentialRejected) {
+    return refreshable
+      ? result.error !== undefined && result.error.includes('续期')
+        ? result.error
+        : `凭据续期后仍被拒绝：${result.error ?? '请重新登录该账号'}`
+      : `凭据已失效，请重新登录该账号（${result.error ?? 'HTTP 401/403'}）`
+  }
+  return result.error ?? '积分查询失败'
 }
 
 /**
@@ -847,6 +894,21 @@ function registerJetHubEndpoints(
       const value = await collectClaimResults<QoderCredential, undefined>(accounts, undefined, {
         resolve: (ref) => ctx.credentials.resolve(ref),
         claim: (credential) => claimQoderDailyCheckin(credential, product),
+        // Qoder 的 access_token 会被服务端提前作废（账号池里的 `expiresAt`
+        // 仍是未来时间，不会触发任何保活），401 时必须用 refresh_token
+        // 续期再重试，否则每张账号卡都停在「凭据已失效」。
+        recover: async (entry, credential) => {
+          if (!isQoderRefreshable(credential)) return undefined
+          const { auth } = requireQoderFamily(provider)
+          await auth.refreshAccountCredential(entry.credentialRef, pool, entry.id)
+          const refreshed = await ctx.credentials.resolve(credentialRef(entry.credentialRef))
+          if (refreshed === undefined) return undefined
+          try {
+            return JSON.parse(refreshed.value) as QoderCredential
+          } catch {
+            return undefined
+          }
+        },
         precheckStatus: false,
         warn: (msg) => ctx.logger?.warn?.(msg),
       })
@@ -2052,7 +2114,7 @@ function registerJetHubEndpoints(
           const { product } = requireQoderFamily(req.provider)
           // 余额来自 `GET {product.openApiBase}/sash/api/v2/me/usage`（实测只需
           // Bearer + Cosy-ClientType，**不需要**模型列表那样的 WASM 签名）。
-          // `fetchQoderCreditBalance` 只吃 QoderCredential，故这里不用
+          // `fetchQoderCreditBalanceDetailed` 只吃 QoderCredential，故这里不用
           // collectCreditBalances 的泛型（它会把产品配置转发给 fetchBalance）。
           const values: RpcCreditsBalancesResponse['accounts'] = []
           for (const account of accounts) {
@@ -2075,19 +2137,40 @@ function registerJetHubEndpoints(
               })
               continue
             }
-            const balance = await fetchQoderCreditBalance(credential, product)
-            await persistCreditBalance(
-              pool,
-              account,
-              balance,
-              ...(balance === null ? ['积分查询失败（凭据失效或响应异常）'] as const : []) as [string?],
-            )
+            let result = await fetchQoderCreditBalanceDetailed(credential, product)
+            // 账号池里的 `expiresAt` 是「令牌自称的过期时间」，而 Qoder 会在
+            // 到期前就作废 access_token（真实报障：卡片一直显示
+            // 「凭据失效或响应异常」，但有效期还没到）。故 401/403 时用
+            // refresh_token 续期一次再重试，无法续期才如实报错。
+            if (result.balance === null && result.credentialRejected && isQoderRefreshable(credential)) {
+              try {
+                await requireQoderFamily(req.provider).auth.refreshAccountCredential(
+                  account.credentialRef, pool, account.id,
+                )
+                const refreshed = await ctx.credentials.resolve(credentialRef(account.credentialRef))
+                if (refreshed !== undefined) {
+                  const next = JSON.parse(refreshed.value) as QoderCredential
+                  credential = next
+                  result = await fetchQoderCreditBalanceDetailed(next, product)
+                }
+              } catch (error) {
+                const reason = error instanceof Error ? error.message : String(error)
+                result = {
+                  balance: null,
+                  credentialRejected: true,
+                  error: `凭据续期失败：${reason}`,
+                }
+              }
+            }
+            const balance = result.balance
+            const failure = qoderBalanceFailureText(result, isQoderRefreshable(credential))
+            await persistCreditBalance(pool, account, balance, failure)
             values.push({
               accountId: account.id,
               nickname: account.nickname,
               balance,
               // 查不到时带上原因，卡片显示原因而非 0（与其它 provider 同约定）。
-              ...balance === null ? { error: '积分查询失败（凭据失效或响应异常）' } : {},
+              ...failure === undefined ? {} : { error: failure },
             })
           }
           return { ok: true, value: { accounts: values } satisfies RpcCreditsBalancesResponse }
@@ -2573,6 +2656,7 @@ function registerJetHubEndpoints(
         set: async (refName, value) => ctx.credentials.set(credentialRef(refName), value),
       },
       appendRuns: (records) => pool.appendAutomationRuns(records),
+      runs: async () => pool.automationRuns(),
       jobs: async () => pool.automationJobs(),
       setJobs: (records) => pool.setAutomationJobs(records),
       config: async () => pool.automationConfig(),

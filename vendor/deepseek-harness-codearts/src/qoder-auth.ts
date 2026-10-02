@@ -10,8 +10,9 @@
  *
  * 1. **没有客户端版本号**。LobsterAI 的 exchange/续期/签到都要带 `version`，
  *    Qoder 不需要，故本服务没有 `resolveClientVersion`。
- * 2. **续期载荷是 `{refresh_token, machine_id}`**，`machine_id` 必须随凭据
- *    持久化并原样回传（见 `qoderRefreshBody`）。
+ * 2. **续期载荷只有 `refresh_token`**（与客户端一致，见 `qoderRefreshBody`）。
+ *    `machine_id` 仍需随凭据持久化，但它只用于设备绑定与加密推理，
+ *    **不参与续期**。
  */
 
 import { Service, type Context } from '@deepseek-ai/cordis'
@@ -308,7 +309,8 @@ export class QoderAuth extends Service {
   }
 
   /**
-   * 静默续期：`refresh_token` + `machine_id` 换取新令牌。
+   * 静默续期：`POST {openApiBase}/api/v1/deviceToken/refresh`，载荷只有
+   * `{refresh_token}`（与桌面客户端一致，见 `qoderRefreshBody`）。
    *
    * 终态判定：
    * - HTTP 401/403、或响应缺 token → 抛 {@link RefreshTokenExpiredError}，
@@ -400,7 +402,9 @@ export class QoderAuth extends Service {
         headers: {
           'Content-Type': 'application/json',
           Accept: 'application/json',
-          'User-Agent': `${this.product.userAgentPrefix}/1.0.0`,
+          // 客户端的 OpenAPI 请求统一用这个 UA（见 app.asar 的 `jYe()`），
+          // 而不是推理端的 `${prefix}/1.0.0`。
+          'User-Agent': 'Qoder',
         },
         body: JSON.stringify(qoderRefreshBody(credential)),
         signal: AbortSignal.timeout(QODER_REQUEST_TIMEOUT_MS),

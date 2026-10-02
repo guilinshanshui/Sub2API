@@ -15,6 +15,7 @@
     "@deepseek-ai/cordis": "^4.0.2",
     "@deepseek-ai/dsh-commands": "^0.1.2-rc.1",
     "@deepseek-ai/dsh-credentials": "^0.1.2-rc.1",
+    "@deepseek-ai/dsh-attachment": "0.1.2-rc.1",
     "@deepseek-ai/dsh-llm": "^0.1.2-rc.1",
     "@fastify/cors": "^11.0.0",
     "@fastify/static": "^8.0.0",
