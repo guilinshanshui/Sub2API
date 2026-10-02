@@ -1,11 +1,18 @@
 @echo off
 setlocal
 set "ROOT=%~dp0"
-if exist "%ROOT%apps\web\dist\index.html" (
+rem Web bundle: a packaged build ships web\dist, a source checkout uses apps\web\dist.
+if exist "%ROOT%web\dist\index.html" (
+    set "SUB2API_WEB_DIST=%ROOT%web\dist"
+) else if exist "%ROOT%apps\web\dist\index.html" (
     set "SUB2API_WEB_DIST=%ROOT%apps\web\dist"
 ) else (
     set "SUB2API_WEB_DIST=%ROOT%web\dist"
 )
+
+rem Gateway entry: a packaged build ships dist\index.js, a source checkout uses apps\gateway\dist\index.js.
+set "GATEWAY_ENTRY=%ROOT%dist\index.js"
+if not exist "%GATEWAY_ENTRY%" set "GATEWAY_ENTRY=%ROOT%apps\gateway\dist\index.js"
 
 where node >nul 2>&1
 if %errorlevel% neq 0 (
@@ -25,7 +32,7 @@ if not exist "%ROOT%node_modules" (
     )
 )
 
-if not exist "%ROOT%apps\gateway\dist\index.js" (
+if not exist "%GATEWAY_ENTRY%" (
     echo Building project...
     call corepack pnpm build
     if %errorlevel% neq 0 (
@@ -42,4 +49,4 @@ echo Sub2API gateway starting...
 echo Admin panel: http://127.0.0.1:8787
 echo Close this window to stop the gateway.
 echo.
-node "%ROOT%apps\gateway\dist\index.js"
+node "%GATEWAY_ENTRY%"
