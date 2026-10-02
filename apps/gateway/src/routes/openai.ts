@@ -34,6 +34,24 @@ function publicModelPayload(model: PublicModel): Record<string, unknown> {
     effort: effort.id,
     description: effort.description ?? effort.name,
   }))
+  const effortIds = reasoningLevels.map((level) => level.effort)
+  const modalities = model.inputModalities ?? ['text']
+  // Codex++ and CC Switch read the WorkBuddy vendor field names from
+  // /v1/models when they build their local model catalogs.
+  const vendorAliases: Record<string, unknown> = {
+    reasoning_supported_efforts: effortIds,
+    reasoning_default_effort: model.defaultReasoningEffort ?? effortIds[0],
+    reasoning_summary: reasoningLevels.length > 0 ? 'auto' : undefined,
+    supports_reasoning: reasoningLevels.length > 0,
+    can_disable_thinking: true,
+    supports_tool_call: true,
+    supports_images: modalities.includes('image'),
+    context_length: model.contextWindow,
+    max_allowed_size: model.contextWindow,
+  }
+  const vendorEntries = Object.fromEntries(
+    Object.entries(vendorAliases).filter(([, value]) => value !== undefined),
+  )
   return {
     id: model.id,
     object: 'model',
@@ -51,6 +69,7 @@ function publicModelPayload(model: PublicModel): Record<string, unknown> {
     supported_reasoning_levels: reasoningLevels,
     ...model.defaultReasoningEffort !== undefined ? { default_reasoning_level: model.defaultReasoningEffort } : {},
     supports_reasoning_summaries: reasoningLevels.length > 0,
+    ...vendorEntries,
   }
 }
 
