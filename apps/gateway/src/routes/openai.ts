@@ -448,16 +448,21 @@ export function registerOpenAiRoutes(app: FastifyInstance, options: OpenAiRouteO
       }
       const settings = options.storage.getSettings()
       timeout = createTimeoutSignal(request, reply, settings.requestTimeoutMs)
+      // Codex sends hosted/built-in tools alongside function tools. Upstream
+      // providers only consume function schemas, so ignore the other entries.
       const tools = Array.isArray(parsed.body.tools)
-        ? parsed.body.tools.map((tool) => {
+        ? parsed.body.tools.flatMap((tool) => {
           const record = asRecord(tool)
+          if (record?.type !== 'function') return []
           const name = asString(record?.name)
-          if (name === undefined) throw new OpenAiRequestError('Tool name is required.', 400, 'invalid_tool')
-          return {
-            name,
-            description: asString(record?.description) ?? '',
-            parameters: asRecord(record?.parameters) ?? { type: 'object', properties: {} },
+          if (name === undefined || name.length === 0) {
+            throw new OpenAiRequestError('Tool function name is required.', 400, 'invalid_tool')
           }
+          return [{
+            name,
+            description: asString(record?.description) ?? "",
+            parameters: asRecord(record?.parameters) ?? { type: 'object', properties: {} },
+          }]
         })
         : undefined
       const requestOptions = {
@@ -768,3 +773,4 @@ export function registerOpenAiRoutes(app: FastifyInstance, options: OpenAiRouteO
     }
   })
 }
+
