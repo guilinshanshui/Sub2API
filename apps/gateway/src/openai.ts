@@ -849,31 +849,46 @@ export async function parseResponsesInput(
   if (!Array.isArray(input)) throw new OpenAiRequestError('input must be a string or an array.', 400, 'invalid_input')
   const messages: Message[] = []
   const systems: string[] = []
+  // Codex 先集中下发一轮里的**多个** function_call，再集中下发它们的输出
+  // （顺序是 call A、call B、result A、result B）。逐条落成独立 assistant 消息时，
+  // 发往腾讯系上游就变成 `assistant(tool_calls:[A])`、`assistant(tool_calls:[B])`、
+  // `tool A`、`tool B`；而后端要求工具结果**紧跟**声明它的那条 assistant，
+  // 于是整个会话被 400 拒绝（「模型无法处理此请求 / 工具记录不完整」）。
+  // 实测 workbuddy/deepseek-v4.1-flash：上述交错形状 400，成组形状 200。
+  // 把连续的 function_call 合并进**同一条** assistant 消息即还原 OpenAI 的
+  // 并行工具调用形状，结果消息的顺序也随之对上。
+  const pendingToolCalls: Array<{ type: 'tool-call'; id: never; name: string; arguments: string }> = []
+  const flushToolCalls = (): void => {
+    if (pendingToolCalls.length === 0) return
+    messages.push(createAssistantMessage({
+      content: pendingToolCalls.splice(0, pendingToolCalls.length),
+      source: { provider: target.provider, model: target.model },
+    }))
+  }
   for (const item of input) {
     const record = asRecord(item)
     if (record === undefined) continue
     const type = asString(record.type)
-    if (type === 'image_url' || type === 'input_image' || type === 'image') {
-      messages.push(createUserMessage({
-        content: await contentBlocksFromOpenAi([record], imageWriter),
-        source: { kind: 'user' },
-      }))
-      continue
-    }
     if (type === 'function_call') {
       const callId = asString(record.call_id)
       const name = asString(record.name)
       if (callId === undefined || name === undefined || name.length === 0) {
         throw new OpenAiRequestError('function_call requires call_id and name.', 400, 'invalid_input')
       }
-      messages.push(createAssistantMessage({
-        content: [{
-          type: 'tool-call',
-          id: callId as never,
-          name,
-          arguments: asString(record.arguments) ?? '{}',
-        }],
-        source: { provider: target.provider, model: target.model },
+      pendingToolCalls.push({
+        type: 'tool-call',
+        id: callId as never,
+        name,
+        arguments: asString(record.arguments) ?? '{}',
+      })
+      continue
+    }
+    // 任何非 function_call 条目都意味着这一批并行调用已经结束。
+    flushToolCalls()
+    if (type === 'image_url' || type === 'input_image' || type === 'image') {
+      messages.push(createUserMessage({
+        content: await contentBlocksFromOpenAi([record], imageWriter),
+        source: { kind: 'user' },
       }))
       continue
     }
@@ -907,6 +922,7 @@ export async function parseResponsesInput(
       }))
     }
   }
+  flushToolCalls()
   return {
     messages,
     system: systems.length > 0 ? systems.join('\n\n') : undefined,

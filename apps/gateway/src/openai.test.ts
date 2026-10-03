@@ -191,6 +191,29 @@ describe('OpenAI request parsing', () => {
     expect(JSON.stringify(parsed.messages)).toContain('tool-result')
   })
 
+  it('merges parallel function calls into one assistant message so results stay adjacent', async () => {
+    const parsed = await parseResponsesInput([
+      { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'run both' }] },
+      { type: 'function_call', call_id: 'call_a', name: 'shell', arguments: '{"command":"a"}' },
+      { type: 'function_call', call_id: 'call_b', name: 'shell', arguments: '{"command":"b"}' },
+      { type: 'function_call_output', call_id: 'call_a', output: 'A' },
+      { type: 'function_call_output', call_id: 'call_b', output: 'B' },
+    ], { provider: 'provider-a', model: 'shared' })
+
+    const shapes = parsed.messages.map((message) => ({
+      role: message.role,
+      blocks: (message.content as Array<{ type: string }> | undefined)?.map((block) => block.type) ?? [],
+    }))
+    // 两个并行调用必须落在**同一条** assistant 消息里，结果紧随其后；否则
+    // 上游会以 400「工具记录不完整」拒绝整个会话。
+    expect(shapes).toEqual([
+      { role: 'user', blocks: ['text'] },
+      { role: 'assistant', blocks: ['tool-call', 'tool-call'] },
+      { role: 'user', blocks: ['tool-result'] },
+      { role: 'user', blocks: ['tool-result'] },
+    ])
+  })
+
   it('rejects image inputs when the attachment service is unavailable', async () => {
     await expect(parseMessagesForOpenAi([
       { role: 'user', content: [{ type: 'image_url', image_url: { url: 'https://example.com/a.png' } }] },
