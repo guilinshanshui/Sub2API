@@ -9,7 +9,8 @@ import type { GatewayStorage } from '../storage.js'
 import { PROVIDER_NAMES, type ProviderId } from '../types.js'
 import { isSafePathId, parsePositiveInteger } from '../utils.js'
 import { errorMessage, requireAdmin, sendAdminError } from './helpers.js'
-import { dueAutomationJobIds, dueDailySigninProviders } from '@sub2api/dsh-codearts'
+import { dailySigninProviders } from '@sub2api/dsh-codearts'
+import { planAutomationDispatches } from '../automation-schedule.js'
 
 interface AdminRouteOptions {
   auth: AdminAuth
@@ -314,18 +315,36 @@ export function registerAdminRoutes(app: FastifyInstance, options: AdminRouteOpt
 
   let automationRunning = false
   let lastAutomationPollAt: number | undefined
+
+  /**
+   * 后台自动化巡检。
+   *
+   * ⚠️ 这里曾经有一个致命的早退：账号级任务（09:00/21:00/01:00）与
+   * 「全服务商每日签到」共用一个 `if (dueIds.length === 0) return`，而账号级
+   * 任务每天只在三个整点命中 —— 于是用户把签到设在 10:10 时，10:10 的轮询
+   * 必然走进早退分支，签到永远不会执行（真实报障 2026-10-04）。
+   *
+   * 现在改为「到点即跑、错过补跑」：具体规则见 `planAutomationDispatches`，
+   * 网关晚启动或机器休眠恢复后也能补上当天错过的那一次。
+   */
   const runAutomationDueJobs = async (): Promise<void> => {
     try {
       const status = await jetHub.call<AutomationStatusResult>('automation.status', {})
-      const dueIds = dueAutomationJobIds(Date.now(), status.jobs)
-        .filter((jobId) => jobId !== 'all_daily_signin')
-      if (dueIds.length === 0) return
-      for (const jobId of dueIds) {
-        await jetHub.call('automation.run', { jobId })
-      }
-      const signinJob = status.jobs.find((job) => job.id === 'all_daily_signin')
-      for (const provider of dueDailySigninProviders(Date.now(), status.config, signinJob?.schedule ?? [])) {
-        await jetHub.call('automation.run', { jobId: 'all_daily_signin', provider })
+      const dispatches = planAutomationDispatches({
+        now: Date.now(),
+        config: status.config,
+        jobs: status.jobs,
+        runs: status.runs ?? [],
+        signinProviders: dailySigninProviders(),
+      })
+      for (const dispatch of dispatches) {
+        app.log.info(
+          { jobId: dispatch.jobId, provider: dispatch.provider, slot: dispatch.slot },
+          'Scheduled automation dispatch',
+        )
+        await jetHub.call('automation.run', dispatch.provider === undefined
+          ? { jobId: dispatch.jobId }
+          : { jobId: dispatch.jobId, provider: dispatch.provider })
       }
     } finally {
       lastAutomationPollAt = Date.now()

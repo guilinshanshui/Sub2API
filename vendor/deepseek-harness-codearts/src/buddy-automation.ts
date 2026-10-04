@@ -64,6 +64,16 @@ const DAILY_SIGNIN_SKIP_REASONS: Readonly<Record<string, string>> = {
   raccoon: 'Raccoon Work 每日积分由服务端自动发放，无需签到',
 }
 
+/**
+ * 支持每日签到的服务商列表。
+ *
+ * 调度器需要它来**补跑**当天错过的那次签到：只按 `HH:mm` 精确匹配分钟时，
+ * 网关晚启动、机器休眠恢复都会让当天的签到被永久跳过。
+ */
+export function dailySigninProviders(): readonly string[] {
+  return DAILY_SIGNIN_PROVIDERS
+}
+
 const HTTP_TIMEOUT_MS = 30_000
 const WEB_TURN_TIMEOUT_MS = 120_000
 const WEB_TURN_POLL_INTERVAL_MS = 3_000

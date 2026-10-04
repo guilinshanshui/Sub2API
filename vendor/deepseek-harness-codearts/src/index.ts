@@ -1,7 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import Schema from '@deepseek-ai/schemastery'
-import { dueAutomationJobIds, dueDailySigninProviders } from './buddy-automation.js'
+import { dailySigninProviders, dueAutomationJobIds, dueDailySigninProviders } from './buddy-automation.js'
 import { registerCodeArtsLlm } from './llm-adapter.js'
 import { registerBuddyLlm } from './buddy-adapter.js'
 import { registerLobsteraiLlm } from './lobsterai-adapter.js'
@@ -43,7 +43,7 @@ import type { RaccoonCredential } from './raccoon.js'
 import type { PhanthyCredential } from './phanthy.js'
 
 export const name = 'codearts-auth'
-export { dueAutomationJobIds, dueDailySigninProviders as dueDailySigninProviders }
+export { dailySigninProviders, dueAutomationJobIds, dueDailySigninProviders as dueDailySigninProviders }
 // `connection` 刻意不列入静态 inject：它只由 Web bundle（dsh-client-connection）
 // 提供，headless/CLI profile 里并不存在。静态 inject 会让本插件在那些 profile
 // 里永久 pending，进而让整个 profile 以
