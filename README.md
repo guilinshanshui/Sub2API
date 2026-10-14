@@ -6,7 +6,20 @@ Sub2API 将 `deepseek-harness-codearts` 的账号池和上游模型适配能力�
 
 ## 一键启动
 
-双击项目根目录下的 `Start.bat` 即可。脚本会自动完成以下操作：
+### 下载 Release 包（推荐）
+
+1. 安装 Node.js `22.19+` 或 `24+`。
+2. 下载 `Sub2API-v*-windows-x64.zip`，解压到普通目录（不要直接在压缩包里运行）。
+3. 双击解压目录中的 `Start.bat`。
+4. 等命令行出现 `Sub2API gateway listening on ...`，浏览器会自动打开管理台。
+5. 关闭命令行窗口即可停止服务。
+
+Release 包已经内置全部生产依赖，不要求安装 pnpm，也不会在启动时重新安装依赖。
+`Start.bat` 会等 `/api/health` 返回正常后再打开浏览器；如果窗口里出现错误，请先按错误提示处理。
+
+### 源码目录启动
+
+在源码目录双击 `Start.bat` 时，脚本会自动完成以下操作：
 
 1. 检查 Node.js 是否已安装
 2. 首次运行时自动安装依赖（`pnpm install`）
@@ -15,6 +28,23 @@ Sub2API 将 `deepseek-harness-codearts` 的账号池和上游模型适配能力�
 5. 关闭命令行窗口即可停止服务
 
 首次打开管理台时会要求设置管理员密码（至少 8 位），之后用密码登录即可。
+
+### 打包 Windows Release
+
+在源码根目录执行：
+
+```powershell
+corepack pnpm package:windows
+```
+
+打包脚本会生成 `release/pkg-v*/` 和 `release/Sub2API-v*-windows-x64.zip`。
+它会强制使用无符号链接的扁平依赖树，避免 Windows 解压后依赖断裂。
+
+如果浏览器提示 `127.0.0.1 拒绝连接`，先查看 `Start.bat` 窗口是否已退出：
+
+- 提示 Node.js 未安装或版本过低：安装 Node.js `22.19+` 或 `24+`。
+- 提示 `node_modules` 或 `dist\index.js` 缺失：说明 ZIP 没有完整解压，重新解压后再运行。
+- 窗口里有其他报错：把窗口中的报错内容保留下来即可定位。
 
 ## 功能
 

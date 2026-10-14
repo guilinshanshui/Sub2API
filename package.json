@@ -11,7 +11,8 @@
     "dev:gateway": "corepack pnpm --filter @sub2api/gateway dev",
     "dev:web": "corepack pnpm --filter @sub2api/web dev",
     "dev": "node scripts/dev.mjs",
-    "start": "node apps/gateway/dist/index.js"
+    "start": "node apps/gateway/dist/index.js",
+    "package:windows": "node scripts/package-windows.mjs"
   },
   "devDependencies": {
     "playwright": "1.49.0"
